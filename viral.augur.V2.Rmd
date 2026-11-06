@@ -17,9 +17,22 @@ output:
 
 ---
 
-## Requirements (1st time): install.packages(c("tidyverse","readr"))
-if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
-BiocManager::install(c("DESeq2","apeglm"))
+
+```{r setuputput-directory}
+
+# ===========================================================
+# OUTPUT DIRECTORY — CURRENT ANALYSIS RUN
+# ===========================================================
+
+project_dir <- normalizePath(".", mustWork = TRUE)
+run_id <- format(Sys.time(), "%Y%m%d_%H%M%S")
+base_dir <- file.path(project_dir, "results", paste0("run_", run_id))
+dir.create(base_dir, recursive = TRUE, showWarnings = FALSE)
+
+message("Project directory: ", project_dir)
+message("Output directory: ", base_dir)
+```
+
 
 
 ```{r setup, include=FALSE}
@@ -39,10 +52,10 @@ clusterProfiler::bitr(
 
 
 
-base_dir <- "~/R/Transcriptomics"
-counts.raw <- read.delim("~/R/Transcriptomics/counts.txt", check.names = FALSE)
-metadata.full <- read.delim("~/R/Transcriptomics/metadata.full.txt", check.names = FALSE)
-props.raw <- read.delim("~/R/Transcriptomics/proporcion_pbmc_proportions.txt", check.names = FALSE)
+base_dir <- "." # Repository root; render from this directory
+counts.raw <- read.delim(file.path(base_dir, "counts.txt"), check.names = FALSE)
+metadata.full <- read.delim(file.path(base_dir, "metadata.full.txt"), check.names = FALSE)
+props.raw <- read.delim(file.path(base_dir, "proporcion_pbmc_proportions.txt"), check.names = FALSE)
 rm(list = intersect(c("counts", "metadata", "props"), ls()))
 
 stopifnot("gene_name" %in% colnames(counts.raw))
@@ -50,6 +63,14 @@ stopifnot("sample" %in% colnames(metadata.full))
 stopifnot("sample" %in% colnames(props.raw))
 ```
 
+
+## Reproducibility and scope
+
+This R Markdown documents the ViralAugur transcriptomic analyses, including PBMC discovery analyses, predictive modeling, cross-cohort evaluation, and time-to-seroconversion analyses. The original analytical code has been retained in this annotated version.
+
+**Execution note:** Run the document from the repository root with the required input files present. Several downstream sections also depend on intermediate outputs, external-validation files, or previously constructed objects. The workflow has not yet been validated as a clean-session, end-to-end render. Refer to `ViralAugur_AUDIT.md` for identified dependencies and issues requiring review.
+
+**Statistical note:** Out-of-fold estimates, apparent performance, and independent external validation represent distinct evaluation settings. The deliberate-leakage experiment is a methodological control, not an unbiased estimate of predictive performance.
 
 ## Basic input QC (structure and concordance)
 
@@ -71,9 +92,10 @@ colnames(metadata.full)
 head(props.raw)
 colnames(props.raw)
 
-Sample consistency (counts vs metadata)
+# Sample consistency (counts vs metadata)
 all(colnames(counts.raw)[-1] %in% metadata.full$sample)
 all(metadata.full$sample %in% colnames(counts.raw)[-1])
+
 ```
 
 ### Counts preparation
@@ -289,25 +311,30 @@ if (nlevels(col_data$condition) < 2) {
 ### Cell proportion selection
 
 ```{r select-nnls-parsimonious, cache=FALSE}
-############################################################
-# Parsimonious selection of cell proportions (NNLS)
-############################################################
 
-# PCA previously computed as pca_cell
+# ============================================================
+# Parsimonious selection of cell proportions (NNLS)
+# ============================================================
+
+# Compute PCA using all available scaled cell proportions
+pca_cell <- prcomp(props_scaled, center = FALSE, scale. = FALSE)
+
+# Extract PC1 loadings
 loadings_pc1 <- pca_cell$rotation[, 1]
 
-# Rank by absolute contribution
+# Rank by absolute contribution to PC1
 loadings_sorted <- sort(abs(loadings_pc1), decreasing = TRUE)
 
-# Select top N (recommended: 3–5)
+# Select the top five cell proportions
 top_n <- 5
 selected_nnls <- names(loadings_sorted)[seq_len(top_n)]
 
 message("Selected NNLS cell proportions (PC1): ",
         paste(selected_nnls, collapse = ", "))
 
-# Parsimonious subset
+# Retain the selected cell proportions
 props_scaled <- props_scaled[, selected_nnls, drop = FALSE]
+
 ```
 
 
@@ -368,9 +395,9 @@ write.table(
 )
 ```
 
+### Logistic regression Cell proportions
 
-
-```{r REGRESION_LOGISTICA_PROP_CELULARES}
+```{r LOGISTIC_PROP_CELLULAR}
 # 0) Ensure the binary response variable exists in the dataframe
 col_data$condition_bin <- ifelse(col_data$condition == "HESN", 1, 0)
 
@@ -476,7 +503,7 @@ ggplot(
 
 ```
 
-
+### DESeq2 – FINAL MODEL (batch + cell_PC1)
 
 ```{r DESEQ_CON_PC1+PC3}
 ############################################################
@@ -556,226 +583,197 @@ write.table(
 
 message("DESeq2 results saved.")
 
-## ---------------------------------------------------------
-## 6) Final QC
-## ---------------------------------------------------------
 
-vsd <- vst(dds, blind = FALSE)
 
-pdf(file.path(base_dir, "DESeq2_QC.pdf"), width = 8, height = 6)
+# ============================================================
+# 6) Final QC — display and save figures
+# ============================================================
 
-plotMA(res_cond, main = "MA plot – condition", ylim = c(-5, 5))
+# Reuse the existing VST object when available
+if (!exists("vsd")) vsd <- vst(dds, blind = FALSE)
 
-pca <- plotPCA(vsd, intgroup = "condition", returnData = TRUE)
+# Prepare PCA
+pca <- DESeq2::plotPCA(vsd, intgroup = "condition", returnData = TRUE)
 percentVar <- round(100 * attr(pca, "percentVar"))
 
-print(
-  ggplot(pca, aes(PC1, PC2, color = condition)) +
-    geom_point(size = 3) +
-    xlab(paste0("PC1: ", percentVar[1], "%")) +
-    ylab(paste0("PC2: ", percentVar[2], "%")) +
-    theme_bw() +
-    ggtitle("PCA (VST-transformed, adjusted design)")
-)
+p_pca <- ggplot(pca, aes(PC1, PC2, color = condition)) +
+  geom_point(size = 3) +
+  xlab(paste0("PC1: ", percentVar[1], "%")) +
+  ylab(paste0("PC2: ", percentVar[2], "%")) +
+  theme_bw() +
+  ggtitle("PCA (VST-transformed expression)")
 
+# Display both figures in RStudio
+DESeq2::plotMA(res_cond, main = "MA plot - condition", ylim = c(-5, 5))
+print(p_pca)
+
+# Save both figures in a single PDF
+pdf(file.path(base_dir, "DESeq2_QC.pdf"), width = 8, height = 6)
+DESeq2::plotMA(res_cond, main = "MA plot - condition", ylim = c(-5, 5))
+print(p_pca)
 dev.off()
 
-## ---------------------------------------------------------
-## 7) Save object
-## ---------------------------------------------------------
+message("QC figures displayed and saved.")
 
-saveRDS(dds, file = file.path(base_dir, "dds_final_PC1.rds"))
+# Display the top 20 differentially expressed genes
+print(head(res_cond_df, 20))
 
-message("DESeq2 model completed successfully.")
+# Summarize differential expression
+cat("Genes tested:", nrow(res_cond_df), "\n")
+cat("Genes with adjusted p < 0.05:", sum(res_cond_df$padj < 0.05, na.rm = TRUE), "\n")
 
 
-############################################################
-# SENSITIVITY MODEL – PC1 + PC3
-############################################################
-
-col_data$cell_PC3_z <- scale(col_data$cell_PC3)
-
-design_formula_sens <- ~ batch + cell_PC1_z + cell_PC3_z + condition
-
-dds_sens <- DESeqDataSetFromMatrix(
-  countData = count_mat,
-  colData   = col_data,
-  design    = design_formula_sens
-)
-
-keep <- rowSums(cpm(counts(dds_sens)) >= 1) >= 5
-dds_sens <- dds_sens[keep, ]
-
-dds_sens <- DESeq(dds_sens)
-
-coef_name <- grep("^condition_", resultsNames(dds_sens), value = TRUE)
-
-res_cond_sens <- lfcShrink(
-  dds_sens,
-  coef = coef_name,
-  type = "apeglm"
-)
-
-res_cond_sens_df <- as.data.frame(res_cond_sens)
-
-write.table(
-  cbind(gene = rownames(res_cond_sens_df), res_cond_sens_df),
-  file = file.path(base_dir, "DESeq2_results_condition_PC1_PC3.tsv"),
-  sep = "\t",
-  quote = FALSE,
-  row.names = FALSE
-)
 ```
 
+###  DESeq2 – FINAL MODEL WITHOUT CELL PROPORTION ADJUSTMENT
 
 
-
-```{r}
+```{r DESeq2-noCell, cache=FALSE}
 ############################################################
-# DESeq2 – FINAL MODEL WITHOUT CELL PROPORTION ADJUSTMENT
+# DESeq2 — FINAL MODEL WITHOUT CELL COMPOSITION ADJUSTMENT
 ############################################################
 
 library(DESeq2)
 library(edgeR)
 library(ggplot2)
 
-## ---------------------------------------------------------
-## 1) Prepare covariates
-## ---------------------------------------------------------
+# ============================================================
+# 1) Prepare covariates
+# ============================================================
 
-col_data$batch     <- factor(col_data$batch)
+col_data$batch <- factor(col_data$batch)
 col_data$condition <- factor(col_data$condition, levels = c("HIV", "HESN"))
 
-stopifnot(
-  all(c("batch", "condition") %in% colnames(col_data))
-)
+stopifnot(all(c("batch", "condition") %in% colnames(col_data)))
 
-## ---------------------------------------------------------
-## 2) Model design
-## ---------------------------------------------------------
+# ============================================================
+# 2) Model design
+# ============================================================
 
 design_formula <- ~ batch + condition
 message("Final design formula: ", deparse(design_formula))
 
-dds <- DESeqDataSetFromMatrix(
-  countData = count_mat,
-  colData   = col_data,
-  design    = design_formula
-)
+dds <- DESeqDataSetFromMatrix(countData = count_mat, colData = col_data, design = design_formula)
 
-## ---------------------------------------------------------
-## 3) CPM filtering (technical)
-## ---------------------------------------------------------
+# ============================================================
+# 3) CPM filtering
+# ============================================================
 
-keep <- rowSums(cpm(counts(dds)) >= 1) >= 5
-dds  <- dds[keep, ]
+keep <- rowSums(edgeR::cpm(counts(dds)) >= 1) >= 5
+dds <- dds[keep, ]
 
 message("Genes retained after CPM filtering: ", sum(keep))
 
-## ---------------------------------------------------------
-## 4) Run DESeq2
-## ---------------------------------------------------------
+# ============================================================
+# 4) Run DESeq2
+# ============================================================
 
 dds <- DESeq(dds)
 
-## ---------------------------------------------------------
-## 5) Results: condition (HESN vs HIV)
-## ---------------------------------------------------------
+# ============================================================
+# 5) Differential expression: HESN vs HIV
+# ============================================================
 
 coef_name <- grep("^condition_", resultsNames(dds), value = TRUE)
 stopifnot(length(coef_name) == 1)
 
-res_cond <- lfcShrink(
-  dds,
-  coef = coef_name,
-  type = "apeglm"
-)
-
+res_cond <- lfcShrink(dds, coef = coef_name, type = "apeglm")
 res_cond_df <- as.data.frame(res_cond[order(res_cond$padj), ])
 
+# Display the top 20 genes
+cat("\n============================================\n")
+cat("TOP 20 DIFFERENTIALLY EXPRESSED GENES\n")
+cat("============================================\n")
+
+print(head(data.frame(gene = rownames(res_cond_df), res_cond_df), 20))
+
+# Format results for export
 res_out <- res_cond_df
-
-# Round available numerical columns
 round_cols <- c("baseMean", "log2FoldChange", "lfcSE")
-
 res_out[round_cols] <- lapply(res_out[round_cols], round, 3)
-
-# Format p-values in scientific notation (without rounding beforehand)
 res_out$pvalue <- formatC(as.numeric(res_out$pvalue), format = "e", digits = 3)
-res_out$padj   <- formatC(as.numeric(res_out$padj),   format = "e", digits = 3)
+res_out$padj <- formatC(as.numeric(res_out$padj), format = "e", digits = 3)
 
 write.table(
   cbind(gene = rownames(res_out), res_out),
   file = file.path(base_dir, "DESeq2_results_condition_noCell.tsv"),
-  sep = "\t",
-  quote = FALSE,
-  row.names = FALSE
+  sep = "\t", quote = FALSE, row.names = FALSE
 )
 
 message("DESeq2 results (without cell composition adjustment) saved.")
 
-# ---------------------------------------------------------
-## 6) Differentially expressed genes (biological threshold)
-## ---------------------------------------------------------
+# ============================================================
+# 6) Significant differentially expressed genes
+# ============================================================
 
 sig_bio <- res_cond_df %>%
-  dplyr::filter(
-    !is.na(padj),
-    padj < 0.05,
-    abs(log2FoldChange) > 0.25
-  )
+  dplyr::filter(!is.na(padj), padj < 0.05, abs(log2FoldChange) > 0.25)
+
+cat("\n============================================\n")
+cat("DIFFERENTIAL EXPRESSION SUMMARY\n")
+cat("============================================\n")
+
+cat("Genes tested:", nrow(res_cond_df), "\n")
+cat("Genes with FDR < 0.05:", sum(res_cond_df$padj < 0.05, na.rm = TRUE), "\n")
+cat("Genes with FDR < 0.05 and |log2FC| > 0.25:", nrow(sig_bio), "\n")
+
+# Display significant genes
+print(head(data.frame(gene = rownames(sig_bio), sig_bio), 20))
 
 write.table(
   cbind(gene = rownames(sig_bio), sig_bio),
   file = file.path(base_dir, "DESeq2_sig_biological_nocell.tsv"),
-  sep = "\t",
-  quote = FALSE,
-  row.names = FALSE
+  sep = "\t", quote = FALSE, row.names = FALSE
 )
 
 message("Significant DE genes (biological threshold): ", nrow(sig_bio))
 
-## ---------------------------------------------------------
-## 6) Quality control
-## ---------------------------------------------------------
+# ============================================================
+# 7) Quality control — display and save
+# ============================================================
 
 vsd <- vst(dds, blind = FALSE)
 
-pdf(file.path(base_dir, "DESeq2_QC_noCell.pdf"), width = 8, height = 6)
-
-plotMA(res_cond, main = "MA plot – condition (no cell adjustment)", ylim = c(-5, 5))
-
-pca <- plotPCA(vsd, intgroup = "condition", returnData = TRUE)
+# Prepare PCA
+pca <- DESeq2::plotPCA(vsd, intgroup = "condition", returnData = TRUE)
 percentVar <- round(100 * attr(pca, "percentVar"))
 
-print(
-  ggplot(pca, aes(PC1, PC2, color = condition)) +
-    geom_point(size = 3) +
-    xlab(paste0("PC1: ", percentVar[1], "%")) +
-    ylab(paste0("PC2: ", percentVar[2], "%")) +
-    theme_bw() +
-    ggtitle("PCA (VST, without cell composition adjustment)")
-)
+p_pca <- ggplot(pca, aes(PC1, PC2, color = condition)) +
+  geom_point(size = 3) +
+  xlab(paste0("PC1: ", percentVar[1], "%")) +
+  ylab(paste0("PC2: ", percentVar[2], "%")) +
+  theme_bw() +
+  ggtitle("PCA (VST, without cell composition adjustment)")
 
+# Display MA plot in RStudio
+DESeq2::plotMA(res_cond, main = "MA plot - condition (no cell adjustment)", ylim = c(-5, 5))
+
+# Display PCA in RStudio
+print(p_pca)
+
+# Save both plots in a single PDF
+pdf(file.path(base_dir, "DESeq2_QC_noCell.pdf"), width = 8, height = 6)
+DESeq2::plotMA(res_cond, main = "MA plot - condition (no cell adjustment)", ylim = c(-5, 5))
+print(p_pca)
 dev.off()
 
-## ---------------------------------------------------------
-## 7) Save object
-## ---------------------------------------------------------
+message("QC figures displayed and saved.")
+
+# ============================================================
+# 8) Save model and VST expression matrix
+# ============================================================
 
 saveRDS(dds, file = file.path(base_dir, "dds_final_noCell.rds"))
 
-vsd <- vst(dds, blind = FALSE)
-assay(vsd)
 write.table(
   assay(vsd),
-  file = "VST_expression_matrix_noCell.tsv",
-  sep = "\t",
-  quote = FALSE
+  file = file.path(base_dir, "VST_expression_matrix_noCell.tsv"),
+  sep = "\t", quote = FALSE
 )
 
-message("DESeq2 model without cell proportion adjustment completed.")
+message("DESeq2 model without cell composition adjustment completed.")
 ```
+
 
 
 ```{r}
@@ -1326,6 +1324,7 @@ ggsave("GSEA_Final_InvertedColors.png", final_grid,width = 10, height = 16, dpi 
 message("Figure generated: blue for HESN (protection) and red for HIV (risk)")
 ```
 
+# Volcano plot 
 
 ```{r}
 library(dplyr)
@@ -1417,6 +1416,7 @@ ggsave("Volcano_plot_HESN_vs_HIV.png", plot = p_volcano, width = 7, height = 6, 
 ggsave("Volcano_plot_HESN_vs_HIV.tiff", plot = p_volcano, width = 7, height = 6, units = "in", dpi = 300, compression = "lzw")
 ```
 
+# Heatmap HIV seroconverters vs. HESN
 
 ```{r}
 library(dplyr)
@@ -1661,6 +1661,7 @@ if (nrow(mat_all) >= 2) {
 }
 ```
 
+
 ```{r, fig.width = 10, fig.height = 20}
 # Heatmap incorporating GSEA leading-edge genes
 
@@ -1879,6 +1880,7 @@ if (nrow(mat_all) >= 2) {
 }
 ```
 
+
 ```{r, fig.width = 10, fig.height = 20}
 # Heatmap incorporating GSEA leading-edge genes
 
@@ -1974,7 +1976,7 @@ if (nrow(mat_le) >= 2) {
 ggsave("mi_grafico_pro.pdf", plot = plot.heat, width = 10, height = 15)
 ```
 
-
+## PREDICTIVE MODEL – Baseline RNA-seq (PBMC – GENES ONLY)
 
 ```{r}
 ############################################################
@@ -2185,6 +2187,24 @@ thr_1se <- as.numeric(pROC::coords(roc_1se, x = "best", best.method = "youden", 
 auc_real_min <- as.numeric(auc(roc_min))
 auc_real_1se <- as.numeric(auc(roc_1se))
 
+
+
+## Export OOF predictions for downstream ROC analysis
+pred_file <- file.path(base_dir, "Predictive_model_GENES_ONLY_predictions.tsv")
+
+preds_df <- data.frame(
+  Sample = colnames(mat_raw),
+  y_bin = y_bin,
+  pred_lambda_min = all_preds_min,
+  pred_lambda_1se = all_preds_1se
+)
+
+stopifnot(!anyNA(preds_df))
+write.table(preds_df, file = pred_file, sep = "\t", quote = FALSE, row.names = FALSE)
+message("OOF predictions exported: ", normalizePath(pred_file))
+
+
+
 ## ---------------------------------------------------------
 ## 6) CALCULATE ADDITIONAL PERFORMANCE METRICS (using Youden's index)
 ## ---------------------------------------------------------
@@ -2355,6 +2375,29 @@ if (exists("roc_1se") && exists("auc_real_1se")) {
 } else {
   warning("The 'roc_1se' or 'auc_real_1se' variables were not found. ROC curve generation was skipped.")
 }
+
+
+## Export gene selection stability for lambda.min
+library(dplyr)
+
+stability_file <- file.path(base_dir, "Predictive_gene_stability_summary_lambdaMin_PBMC.tsv")
+
+gene_stability_min <- coefficients_history %>%
+  filter(Lambda == "lambda.min", Gene != "(Intercept)") %>%
+  group_by(Gene) %>%
+  summarise(
+    Folds_Evaluated = n(),
+    Folds_Selected = sum(Beta != 0),
+    Selection_Frequency = Folds_Selected / length(folds),
+    Mean_Beta = if (any(Beta != 0)) mean(Beta[Beta != 0]) else NA_real_,
+    Median_Beta = if (any(Beta != 0)) median(Beta[Beta != 0]) else NA_real_,
+    .groups = "drop"
+  ) %>%
+  arrange(desc(Selection_Frequency), desc(abs(Mean_Beta)))
+
+write.table(gene_stability_min, file = stability_file, sep = "\t", quote = FALSE, row.names = FALSE)
+message("Gene stability summary exported: ", normalizePath(stability_file))
+
 ```
 
 
@@ -2368,7 +2411,15 @@ library(pROC)
 library(utils)
 
 # 1. Configure paths (ensure consistency with the main analysis base_dir)
-base_dir <- "." # Change this to the appropriate directory if necessary
+
+## Preserve the directory configured in the main analysis
+if (!exists("base_dir")) stop("ERROR: base_dir is not defined.")
+pred_file <- file.path(base_dir, "Predictive_model_GENES_ONLY_predictions.tsv")
+
+if (!file.exists(pred_file)) {
+  stop("ERROR: Prediction file not found at: ", normalizePath(pred_file, mustWork = FALSE))
+}
+
 pred_file <- file.path(base_dir, "Predictive_model_GENES_ONLY_predictions.tsv")
 
 if (!file.exists(pred_file)) {
@@ -2436,7 +2487,11 @@ cat("==================================================\n")
 library(tidyverse)
 
 # 1) Define the file path and load the gene stability results
-base_dir <- "." # Change this path if the files are stored in another directory
+## Use the directory configured in the main analysis
+if (!exists("base_dir")) stop("ERROR: base_dir is not defined.")
+
+stability_file <- file.path(base_dir, "Predictive_gene_stability_summary_lambdaMin_PBMC.tsv")
+if (!file.exists(stability_file)) stop("ERROR: Stability file not found: ", normalizePath(stability_file, mustWork = FALSE))
 stability_file <- file.path(base_dir, "Predictive_gene_stability_summary_lambdaMin_PBMC.tsv")
 
 if (!file.exists(stability_file)) {
@@ -2449,7 +2504,7 @@ df <- read.table(stability_file, header = TRUE, sep = "\t", stringsAsFactors = F
 # 2) Prepare the data using the exact column names in the input file
 df_plot <- df %>%
   # [ADJUSTED] Apply the stability threshold using the original lowercase column name
-  filter(porcentaje_estabilidad >= 40) %>%
+  filter(Selection_Frequency >= 0.40) %>%
   mutate(
     # Association direction based on the sign of the mean coefficient
     direction = ifelse(Mean_Beta > 0, "HESN-associated", "HIV-1 seroconversion"),
@@ -3223,6 +3278,8 @@ kable(
 )
 ```
 
+
+
 ```{r}
 library(pheatmap)
 
@@ -3237,6 +3294,23 @@ genes <- c(
 ## -----------------------------------------
 ## Check gene availability
 ## -----------------------------------------
+
+
+## Retrieve normalized baseline expression
+if (exists("vsd")) {
+  expr_mat <- SummarizedExperiment::assay(vsd)
+} else if (exists("dds")) {
+  vsd_corr <- DESeq2::vst(dds, blind = TRUE)
+  expr_mat <- SummarizedExperiment::assay(vsd_corr)
+} else {
+  stop("ERROR: Neither 'vsd' nor 'dds' is available.")
+}
+
+## Verify gene identifiers and sample alignment
+stopifnot(is.matrix(expr_mat), !is.null(rownames(expr_mat)))
+cat("Expression matrix dimensions:", paste(dim(expr_mat), collapse = " x "), "\n")
+cat("First gene identifiers:", paste(head(rownames(expr_mat)), collapse = ", "), "\n")
+
 
 genes_present <- intersect(genes, rownames(expr_mat))
 genes_missing <- setdiff(genes, rownames(expr_mat))
@@ -3818,7 +3892,13 @@ df_surv <- metadata_surv %>%
 
 cat("\n--- RECONSTRUCTED DF_SURV ---\n")
 cat("Samples:", nrow(df_surv), "\n")
-print(head(df_surv[, required_surv_vars]))
+
+## Verify survival metadata and required columns
+required_surv_vars <- c("sampleID", "condition", "TTS", "age", "risk")
+missing_surv_vars <- setdiff(required_surv_vars, colnames(df_surv))
+if (length(missing_surv_vars) > 0) stop("ERROR: Missing survival metadata columns: ", paste(missing_surv_vars, collapse = ", "))
+print(head(df_surv[, required_surv_vars, drop = FALSE]))
+
 
 ## =============================================================================
 ## STEP A: EXTRACT THE ELASTIC NET SCORE (THREE ALTERNATIVE SOURCES)
@@ -4064,6 +4144,7 @@ print(p_forest_custom)
 ggsave("forest_plot_cox_terciles_custom.pdf", plot = p_forest_custom, width = 10, height = 5, device = cairo_pdf)
 ggsave("forest_plot_cox_terciles_custom_600dpi.png", plot = p_forest_custom, width = 10, height = 5, dpi = 600)
 ```
+
 
 
 ```{r}
@@ -4467,6 +4548,29 @@ cat(
   "\n"
 )
 
+
+## Reconstruct survival dataset using OOF predictions
+pred_file <- file.path(base_dir, "Predictive_model_GENES_ONLY_predictions.tsv")
+if (!file.exists(pred_file)) stop("ERROR: OOF prediction file not found: ", pred_file)
+
+pred_oof <- read.delim(pred_file, stringsAsFactors = FALSE)
+required_pred <- c("Sample", "y_bin", "pred_lambda_1se")
+stopifnot(all(required_pred %in% names(pred_oof)))
+stopifnot(all(c("sampleID", "TTS", "event", "age", "risk") %in% names(df_surv)))
+stopifnot(!anyDuplicated(pred_oof$Sample), !anyDuplicated(df_surv$sampleID))
+
+df_surv_oof <- df_surv %>%
+  select(-any_of(c("en_score_oof", "en_risk_score", "en_score_z"))) %>%
+  left_join(pred_oof %>% transmute(sampleID = Sample, en_score_oof = pred_lambda_1se), by = "sampleID") %>%
+  mutate(en_risk_score = 1 - en_score_oof)
+
+stopifnot(!anyNA(df_surv_oof$en_risk_score))
+df_surv_oof$en_score_z <- as.numeric(scale(df_surv_oof$en_risk_score))
+stopifnot(is.finite(sd(df_surv_oof$en_score_z)), sd(df_surv_oof$en_score_z) > 0)
+
+cat("OOF scores matched:", sum(!is.na(df_surv_oof$en_score_oof)), "of", nrow(df_surv_oof), "\n")
+
+
 ## -------------------------------------------------------------------------
 ## 3. TIME-VARYING COX MODEL USING OOF SCORES
 ##
@@ -4593,9 +4697,17 @@ print(
 ## beta_score + beta_time*log(t+1) = 0
 ## -------------------------------------------------------------------------
 
-t_cross <- exp(
-  -beta_score / beta_time
-) - 1
+
+## Check whether the time-varying HR crosses 1 within follow-up
+t_cross <- if (is.finite(beta_time) && abs(beta_time) > 1e-10) exp(-beta_score / beta_time) - 1 else NA_real_
+max_followup <- max(df_surv_clean$TTS, na.rm = TRUE)
+
+if (is.finite(t_cross) && t_cross >= 0 && t_cross <= max_followup) {
+  cat("HR(t) = 1 at approximately day:", round(t_cross, 1), "\n")
+} else {
+  cat("No HR(t) = 1 crossing identified within the observed follow-up.\n")
+}
+
 
 cat("\nHR(t) crosses HR = 1 at approximately day:",
     round(t_cross, 1), "\n")
@@ -4666,1404 +4778,6 @@ p_logrank_oof
 ```
 
 
-
-## Analysis clustering genes HESN-UP
-
-```{r}
-
-library(biomaRt)
-library(dplyr)
-library(purrr)
-library(ggplot2)
-
-## =============================================================================
-## GENOMIC CLUSTERING ANALYSIS OF HESN-UPREGULATED GENES
-## =============================================================================
-
-## =============================================================================
-## 1. LOAD HESN-UPREGULATED GENES
-## =============================================================================
-
-# Load the complete gene list from a text file containing one gene per line
-genes_HESN <- scan(
-  "genes_UP_HESN.txt",
-  what = character(),
-  quiet = TRUE
-)
-
-# Remove duplicate gene symbols and surrounding whitespace
-genes_HESN <- unique(trimws(genes_HESN))
-
-length(genes_HESN)
-
-## =============================================================================
-## 2. RETRIEVE GENOMIC COORDINATES FROM ENSEMBL
-## =============================================================================
-
-# Connect to the Ensembl BioMart database
-mart <- useEnsembl(
-  biomart = "genes",
-  dataset = "hsapiens_gene_ensembl",
-  mirror = "useast"
-)
-
-# Retrieve genomic coordinates and annotations for HESN-upregulated genes
-coords_HESN <- getBM(
-  attributes = c(
-    "hgnc_symbol",
-    "ensembl_gene_id",
-    "chromosome_name",
-    "start_position",
-    "end_position",
-    "strand",
-    "band",
-    "gene_biotype"
-  ),
-  filters = "hgnc_symbol",
-  values = genes_HESN,
-  mart = mart
-) %>%
-  filter(
-    hgnc_symbol != "",
-    chromosome_name %in% c(as.character(1:22), "X", "Y")
-  ) %>%
-  distinct(hgnc_symbol, .keep_all = TRUE) %>%
-  arrange(
-    factor(
-      chromosome_name,
-      levels = c(as.character(1:22), "X", "Y")
-    ),
-    start_position
-  )
-
-# Identify genes without matching genomic coordinates
-genes_missing <- setdiff(
-  genes_HESN,
-  coords_HESN$hgnc_symbol
-)
-
-genes_missing
-
-## =============================================================================
-## 3. IDENTIFY GENOMIC CLUSTERS BASED ON INTERGENIC DISTANCE
-## =============================================================================
-
-# Define genomic clusters using a maximum intergenic distance threshold
-assign_clusters <- function(coords, max_gap = 1e6) {
-
-  coords %>%
-    arrange(
-      factor(
-        chromosome_name,
-        levels = c(as.character(1:22), "X", "Y")
-      ),
-      start_position
-    ) %>%
-    group_by(chromosome_name) %>%
-    mutate(
-      previous_end = lag(end_position),
-
-      gap_bp = start_position - previous_end,
-
-      new_cluster =
-        is.na(previous_end) |
-        gap_bp > max_gap,
-
-      cluster_num = cumsum(new_cluster)
-    ) %>%
-    ungroup() %>%
-    mutate(
-      cluster_id =
-        paste0("chr", chromosome_name, "_C", cluster_num)
-    )
-}
-
-# Assign genomic clusters using a maximum gap of 1 Mb
-coords_1Mb <- assign_clusters(
-  coords_HESN,
-  max_gap = 1e6
-)
-
-## =============================================================================
-## 4. ANNOTATE GENE FAMILIES
-## =============================================================================
-
-# Classify genes into major gene families based on HGNC symbol patterns
-coords_1Mb <- coords_1Mb %>%
-  mutate(
-    GeneFamily = case_when(
-
-      grepl("^OR[0-9]", hgnc_symbol) ~ "Olfactory receptor",
-
-      grepl("^TRAV|^TRBV|^TRGV|^TRDV",
-            hgnc_symbol) ~ "TCR",
-
-      grepl("^IGH|^IGK|^IGL",
-            hgnc_symbol) ~ "Immunoglobulin",
-
-      grepl("^HBA|^HBB|^HBD$|^HBM$",
-            hgnc_symbol) ~ "Globin",
-
-      grepl("^KRTAP",
-            hgnc_symbol) ~ "Keratin-associated protein",
-
-      grepl("^KRT[0-9]",
-            hgnc_symbol) ~ "Keratin",
-
-      grepl("^SPRR",
-            hgnc_symbol) ~ "SPRR",
-
-      grepl("^LCE",
-            hgnc_symbol) ~ "LCE",
-
-      grepl("^ZNF",
-            hgnc_symbol) ~ "Zinc-finger",
-
-      grepl("^PCDH",
-            hgnc_symbol) ~ "Protocadherin",
-
-      grepl("^HIST",
-            hgnc_symbol) ~ "Histone",
-
-      TRUE ~ "Other"
-    )
-  )
-
-## =============================================================================
-## 5. SUMMARIZE GENOMIC CLUSTERS
-## =============================================================================
-
-# Summarize genomic clusters containing at least two HESN-upregulated genes
-cluster_summary <- coords_1Mb %>%
-  group_by(chromosome_name, cluster_id) %>%
-  summarise(
-    n_genes = n(),
-    cluster_start = min(start_position),
-    cluster_end = max(end_position),
-    span_Mb = (cluster_end - cluster_start) / 1e6,
-    genes = paste(hgnc_symbol, collapse = ", "),
-    .groups = "drop"
-  ) %>%
-  filter(n_genes >= 2) %>%
-  arrange(desc(n_genes), chromosome_name, cluster_start)
-
-# Display the complete genomic cluster summary
-print(cluster_summary, n = Inf)
-View(cluster_summary)
-
-```
-
-
-## Statistical permutation test for genomic clustering enrichment
-
-
-```{r}
-################################################################################
-## GENOMIC CLUSTERING + PERMUTATION TEST
-## HESN-UP vs HIV-UP
-##
-## Primary cluster definition:
-## - same chromosome
-## - at least 3 genes
-## - distance between consecutive genes <= 1 Mb
-##
-## Null model:
-## - same number of genes per chromosome as the observed gene set
-## - sampling from the actual background of genes tested by DESeq2
-################################################################################
-
-library(biomaRt)
-library(dplyr)
-library(ggplot2)
-library(tibble)
-
-## =============================================================================
-## 1. GLOBAL PARAMETERS
-## =============================================================================
-
-MAX_GAP <- 1e6
-MIN_CLUSTER_SIZE <- 3
-B_PERM <- 10000
-
-
-## =============================================================================
-## 2. DESEQ2 INPUTS
-## =============================================================================
-
-# Actual background: genes passing technical filtering and included in differential expression testing
-background_genes <- rownames(dds)
-
-# HESN-UP: adjusted p-value < 0.05 and log2FC > 0
-genes_HESN_up <- rownames(
-  res_cond_df[
-    !is.na(res_cond_df$padj) &
-      res_cond_df$padj < 0.05 &
-      res_cond_df$log2FoldChange > 0,
-  ]
-)
-
-# HIV-UP: adjusted p-value < 0.05 and log2FC < 0
-genes_HIV_up <- rownames(
-  res_cond_df[
-    !is.na(res_cond_df$padj) &
-      res_cond_df$padj < 0.05 &
-      res_cond_df$log2FoldChange < 0,
-  ]
-)
-
-cat("============================================================\n")
-cat("DESEQ2 INPUT SUMMARY\n")
-cat("============================================================\n")
-cat("Background:", length(background_genes), "\n")
-cat("HESN-UP:", length(genes_HESN_up), "\n")
-cat("HIV-UP:", length(genes_HIV_up), "\n\n")
-
-
-## =============================================================================
-## 3. CONNECT TO ENSEMBL / GRCh38
-## =============================================================================
-
-mart <- useEnsembl(
-  biomart = "genes",
-  dataset = "hsapiens_gene_ensembl",
-  mirror = "useast"
-)
-
-
-## =============================================================================
-## 4. FUNCTION TO RETRIEVE GENOMIC COORDINATES
-## =============================================================================
-
-get_coords <- function(genes, mart) {
-
-  getBM(
-    attributes = c(
-      "hgnc_symbol",
-      "chromosome_name",
-      "start_position",
-      "end_position",
-      "band",
-      "gene_biotype"
-    ),
-    filters = "hgnc_symbol",
-    values = unique(genes),
-    mart = mart
-  ) %>%
-    dplyr::filter(
-      hgnc_symbol != "",
-      chromosome_name %in% c(as.character(1:22), "X", "Y")
-    ) %>%
-    dplyr::distinct(
-      hgnc_symbol,
-      .keep_all = TRUE
-    )
-}
-
-
-# Background coordinates are retrieved only once
-coords_background <- get_coords(
-  background_genes,
-  mart
-)
-
-cat("Background genes with genomic coordinates:",
-    nrow(coords_background), "\n\n")
-
-
-## =============================================================================
-## 5. FUNCTION TO ASSIGN PHYSICAL GENOMIC CLUSTERS
-## =============================================================================
-
-assign_clusters <- function(coords, max_gap = 1e6) {
-
-  coords %>%
-    dplyr::arrange(
-      factor(
-        chromosome_name,
-        levels = c(as.character(1:22), "X", "Y")
-      ),
-      start_position,
-      end_position
-    ) %>%
-    dplyr::group_by(
-      chromosome_name
-    ) %>%
-    dplyr::mutate(
-
-      previous_end =
-        dplyr::lag(end_position),
-
-      gap_bp =
-        start_position - previous_end,
-
-      # Start a new cluster if:
-      # 1) this is the first gene on the chromosome
-      # 2) the gap from the previous gene exceeds max_gap
-      new_cluster =
-        is.na(previous_end) |
-        gap_bp > max_gap,
-
-      cluster_number =
-        cumsum(new_cluster)
-
-    ) %>%
-    dplyr::ungroup() %>%
-    dplyr::mutate(
-
-      cluster_id =
-        paste0(
-          "chr",
-          chromosome_name,
-          "_C",
-          cluster_number
-        )
-    )
-}
-
-
-## =============================================================================
-## 6. GENOMIC CLUSTERING METRICS
-## =============================================================================
-
-get_cluster_metrics <- function(
-    coords,
-    max_gap = 1e6,
-    min_cluster_size = 3
-) {
-
-  x <- assign_clusters(
-    coords,
-    max_gap = max_gap
-  )
-
-  cluster_sizes <- x %>%
-    dplyr::count(
-      chromosome_name,
-      cluster_id,
-      name = "n_genes"
-    )
-
-  valid_clusters <- cluster_sizes %>%
-    dplyr::filter(
-      n_genes >= min_cluster_size
-    )
-
-  n_clustered <- sum(
-    valid_clusters$n_genes
-  )
-
-  tibble::tibble(
-
-    n_total_genes =
-      nrow(x),
-
-    n_clusters =
-      nrow(valid_clusters),
-
-    n_clustered_genes =
-      n_clustered,
-
-    proportion_clustered =
-      n_clustered / nrow(x),
-
-    max_cluster_size =
-      ifelse(
-        nrow(valid_clusters) == 0,
-        0,
-        max(valid_clusters$n_genes)
-      )
-  )
-}
-
-
-## =============================================================================
-## 7. EMPIRICAL P-VALUE
-## =============================================================================
-
-empirical_p <- function(
-    null_values,
-    observed
-) {
-
-  (
-    sum(
-      null_values >= observed
-    ) + 1
-  ) /
-    (
-      length(null_values) + 1
-    )
-}
-
-
-## =============================================================================
-## 8. CHROMOSOME-MATCHED RANDOM SAMPLING
-## =============================================================================
-
-sample_chr_matched <- function(
-    coords_background,
-    chr_counts
-) {
-
-  sampled_list <- lapply(
-    seq_len(nrow(chr_counts)),
-
-    function(i) {
-
-      chr_i <-
-        chr_counts$chromosome_name[i]
-
-      n_i <-
-        chr_counts$n_target[i]
-
-      pool <- coords_background %>%
-        dplyr::filter(
-          chromosome_name == chr_i
-        )
-
-      if (nrow(pool) < n_i) {
-
-        stop(
-          paste0(
-            "Insufficient background genes on chr ",
-            chr_i,
-            ". Required: ",
-            n_i,
-            " genes; available: ",
-            nrow(pool),
-            "."
-          )
-        )
-      }
-
-      pool %>%
-        dplyr::slice_sample(
-          n = n_i,
-          replace = FALSE
-        )
-    }
-  )
-
-  dplyr::bind_rows(
-    sampled_list
-  )
-}
-
-
-## =============================================================================
-## 9. MAIN ANALYSIS FUNCTION
-## =============================================================================
-
-run_clustering_test <- function(
-    target_genes,
-    label,
-    coords_background,
-    mart,
-    B = 10000,
-    max_gap = 1e6,
-    min_cluster_size = 3,
-    seed = 12345
-) {
-
-  cat("\n============================================================\n")
-  cat("ANALYSIS:", label, "\n")
-  cat("============================================================\n")
-
-  ## ---------------------------------------------------------------------------
-  ## 9.1 Genomic coordinates
-  ## ---------------------------------------------------------------------------
-
-  coords_target <- get_coords(
-    target_genes,
-    mart
-  )
-
-  missing_genes <- setdiff(
-    target_genes,
-    coords_target$hgnc_symbol
-  )
-
-  cat("Original genes:",
-      length(target_genes), "\n")
-
-  cat("Genes with genomic coordinates:",
-      nrow(coords_target), "\n")
-
-  cat("Genes without genomic coordinates:",
-      length(missing_genes), "\n")
-
-  if (length(missing_genes) > 0) {
-
-    write.table(
-      data.frame(
-        gene = missing_genes
-      ),
-      paste0(
-        label,
-        "_genes_without_coordinates.tsv"
-      ),
-      sep = "\t",
-      quote = FALSE,
-      row.names = FALSE
-    )
-  }
-
-
-  ## ---------------------------------------------------------------------------
-  ## 9.2 Observed genomic clustering
-  ## ---------------------------------------------------------------------------
-
-  obs <- get_cluster_metrics(
-    coords_target,
-    max_gap = max_gap,
-    min_cluster_size = min_cluster_size
-  )
-
-  cat("\nObserved genomic clustering:\n")
-  print(obs)
-
-
-  ## ---------------------------------------------------------------------------
-  ## 9.3 Detailed table of observed clusters
-  ## ---------------------------------------------------------------------------
-
-  coords_clustered <- assign_clusters(
-    coords_target,
-    max_gap = max_gap
-  )
-
-  cluster_summary <- coords_clustered %>%
-    dplyr::group_by(
-      chromosome_name,
-      cluster_id
-    ) %>%
-    dplyr::summarise(
-
-      n_genes =
-        dplyr::n(),
-
-      cluster_start =
-        min(start_position),
-
-      cluster_end =
-        max(end_position),
-
-      span_bp =
-        cluster_end - cluster_start,
-
-      span_Mb =
-        span_bp / 1e6,
-
-      max_gap_kb =
-        ifelse(
-          dplyr::n() > 1,
-          max(
-            gap_bp[-1],
-            na.rm = TRUE
-          ) / 1000,
-          NA_real_
-        ),
-
-      median_gap_kb =
-        ifelse(
-          dplyr::n() > 1,
-          median(
-            gap_bp[-1],
-            na.rm = TRUE
-          ) / 1000,
-          NA_real_
-        ),
-
-      cytobands =
-        paste(
-          unique(band),
-          collapse = "; "
-        ),
-
-      genes =
-        paste(
-          hgnc_symbol,
-          collapse = ", "
-        ),
-
-      .groups = "drop"
-    ) %>%
-    dplyr::filter(
-      n_genes >= min_cluster_size
-    ) %>%
-    dplyr::arrange(
-      dplyr::desc(n_genes),
-      chromosome_name,
-      cluster_start
-    )
-
-
-  ## ---------------------------------------------------------------------------
-  ## 9.4 Gene-level table of genes belonging to qualifying clusters
-  ## ---------------------------------------------------------------------------
-
-  clustered_genes <- coords_clustered %>%
-    dplyr::semi_join(
-      cluster_summary %>%
-        dplyr::select(
-          cluster_id
-        ),
-      by = "cluster_id"
-    ) %>%
-    dplyr::select(
-      chromosome_name,
-      cluster_id,
-      hgnc_symbol,
-      band,
-      start_position,
-      end_position,
-      gap_bp,
-      gene_biotype
-    ) %>%
-    dplyr::arrange(
-      chromosome_name,
-      cluster_id,
-      start_position
-    )
-
-
-  ## ---------------------------------------------------------------------------
-  ## 9.5 Chromosomal distribution
-  ## ---------------------------------------------------------------------------
-
-  chr_counts <- coords_target %>%
-    dplyr::count(
-      chromosome_name,
-      name = "n_target"
-    )
-
-
-  ## ---------------------------------------------------------------------------
-  ## 9.6 Permutations
-  ## ---------------------------------------------------------------------------
-
-  set.seed(seed)
-
-  perm_results <- vector(
-    mode = "list",
-    length = B
-  )
-
-  cat(
-    "\nStarting",
-    B,
-    "chromosome-matched permutations...\n"
-  )
-
-  for (b in seq_len(B)) {
-
-    random_coords <-
-      sample_chr_matched(
-        coords_background,
-        chr_counts
-      )
-
-    perm_results[[b]] <-
-      get_cluster_metrics(
-        random_coords,
-        max_gap = max_gap,
-        min_cluster_size = min_cluster_size
-      )
-
-    if (b %% 1000 == 0) {
-
-      cat(
-        label,
-        ":",
-        b,
-        "/",
-        B,
-        "\n"
-      )
-    }
-  }
-
-  perm_results <-
-    dplyr::bind_rows(
-      perm_results
-    )
-
-
-  ## ---------------------------------------------------------------------------
-  ## 9.7 Empirical p-values
-  ## ---------------------------------------------------------------------------
-
-  p_clusters <-
-    empirical_p(
-      perm_results$n_clusters,
-      obs$n_clusters
-    )
-
-  p_clustered_genes <-
-    empirical_p(
-      perm_results$n_clustered_genes,
-      obs$n_clustered_genes
-    )
-
-  p_prop_clustered <-
-    empirical_p(
-      perm_results$proportion_clustered,
-      obs$proportion_clustered
-    )
-
-  p_max_cluster <-
-    empirical_p(
-      perm_results$max_cluster_size,
-      obs$max_cluster_size
-    )
-
-
-  ## ---------------------------------------------------------------------------
-  ## 9.8 Statistical summary
-  ## ---------------------------------------------------------------------------
-
-  permutation_summary <- tibble::tibble(
-
-    Metric = c(
-      paste0(
-        "Number of clusters (≥",
-        min_cluster_size,
-        " genes)"
-      ),
-
-      paste0(
-        "Number of genes contained in clusters (≥",
-        min_cluster_size,
-        " genes)"
-      ),
-
-      paste0(
-        "Proportion of genes contained in clusters (≥",
-        min_cluster_size,
-        " genes)"
-      ),
-
-      "Maximum cluster size"
-    ),
-
-    Observed = c(
-      obs$n_clusters,
-      obs$n_clustered_genes,
-      obs$proportion_clustered,
-      obs$max_cluster_size
-    ),
-
-    Null_Mean = c(
-      mean(
-        perm_results$n_clusters
-      ),
-      mean(
-        perm_results$n_clustered_genes
-      ),
-      mean(
-        perm_results$proportion_clustered
-      ),
-      mean(
-        perm_results$max_cluster_size
-      )
-    ),
-
-    Null_SD = c(
-      sd(
-        perm_results$n_clusters
-      ),
-      sd(
-        perm_results$n_clustered_genes
-      ),
-      sd(
-        perm_results$proportion_clustered
-      ),
-      sd(
-        perm_results$max_cluster_size
-      )
-    ),
-
-    Empirical_P = c(
-      p_clusters,
-      p_clustered_genes,
-      p_prop_clustered,
-      p_max_cluster
-    )
-  )
-
-  cat("\nPermutation test results:\n")
-  print(
-    permutation_summary
-  )
-
-
-  ## ---------------------------------------------------------------------------
-  ## 9.9 Main figure
-  ## ---------------------------------------------------------------------------
-
-  p <- ggplot(
-    perm_results,
-    aes(
-      x = n_clustered_genes
-    )
-  ) +
-    geom_histogram(
-      bins = 40,
-      boundary = 0
-    ) +
-    geom_vline(
-      xintercept =
-        obs$n_clustered_genes,
-      linetype = "dashed",
-      linewidth = 1
-    ) +
-    annotate(
-      "text",
-      x =
-        obs$n_clustered_genes,
-      y = Inf,
-
-      label =
-        paste0(
-          "Observed = ",
-          obs$n_clustered_genes,
-          "\nEmpirical p = ",
-          signif(
-            p_clustered_genes,
-            3
-          )
-        ),
-
-      vjust = 1.5,
-      hjust = 1.05
-    ) +
-    labs(
-      title =
-        paste0(
-          "Genomic clustering — ",
-          label
-        ),
-
-      subtitle =
-        paste0(
-          B,
-          " chromosome-matched permutations; ",
-          "cluster ≥ ",
-          min_cluster_size,
-          " genes; gap ≤ ",
-          max_gap / 1e6,
-          " Mb"
-        ),
-
-      x =
-        paste0(
-          "Genes located in clusters of ≥",
-          min_cluster_size,
-          " genes"
-        ),
-
-      y =
-        "Permutation count"
-    ) +
-    theme_classic(
-      base_size = 12
-    )
-
-
-  print(p)
-
-
-  ## ---------------------------------------------------------------------------
-  ## 9.10 Export results
-  ## ---------------------------------------------------------------------------
-
-  prefix <- gsub(
-    "[^A-Za-z0-9]+",
-    "_",
-    label
-  )
-
-  write.table(
-    cluster_summary,
-    paste0(
-      prefix,
-      "_physical_clusters_min",
-      min_cluster_size,
-      "_gap",
-      max_gap / 1e6,
-      "Mb.tsv"
-    ),
-    sep = "\t",
-    quote = FALSE,
-    row.names = FALSE
-  )
-
-  write.table(
-    clustered_genes,
-    paste0(
-      prefix,
-      "_clustered_genes_min",
-      min_cluster_size,
-      "_gap",
-      max_gap / 1e6,
-      "Mb.tsv"
-    ),
-    sep = "\t",
-    quote = FALSE,
-    row.names = FALSE
-  )
-
-  write.table(
-    permutation_summary,
-    paste0(
-      prefix,
-      "_permutation_summary_min",
-      min_cluster_size,
-      "_gap",
-      max_gap / 1e6,
-      "Mb.tsv"
-    ),
-    sep = "\t",
-    quote = FALSE,
-    row.names = FALSE
-  )
-
-  write.table(
-    perm_results,
-    paste0(
-      prefix,
-      "_permutation_raw_min",
-      min_cluster_size,
-      "_gap",
-      max_gap / 1e6,
-      "Mb.tsv"
-    ),
-    sep = "\t",
-    quote = FALSE,
-    row.names = FALSE
-  )
-
-  ggsave(
-    paste0(
-      prefix,
-      "_clustering_permutation_min",
-      min_cluster_size,
-      "_gap",
-      max_gap / 1e6,
-      "Mb.pdf"
-    ),
-    plot = p,
-    width = 8,
-    height = 5
-  )
-
-
-  ## ---------------------------------------------------------------------------
-  ## 9.11 Return analysis objects
-  ## ---------------------------------------------------------------------------
-
-  return(
-    list(
-      coordinates = coords_target,
-      clustered_coordinates = coords_clustered,
-      clusters = cluster_summary,
-      clustered_genes = clustered_genes,
-      observed = obs,
-      permutations = perm_results,
-      summary = permutation_summary,
-      plot = p
-    )
-  )
-}
-
-
-## =============================================================================
-## 10. RUN HESN-UP ANALYSIS
-## =============================================================================
-
-res_HESN_cluster <- run_clustering_test(
-  target_genes = genes_HESN_up,
-  label = "HESN_UP",
-  coords_background = coords_background,
-  mart = mart,
-  B = B_PERM,
-  max_gap = MAX_GAP,
-  min_cluster_size = MIN_CLUSTER_SIZE,
-  seed = 20260824
-)
-
-
-## =============================================================================
-## 11. RUN HIV-UP ANALYSIS
-## =============================================================================
-
-res_HIV_cluster <- run_clustering_test(
-  target_genes = genes_HIV_up,
-  label = "HIV_UP",
-  coords_background = coords_background,
-  mart = mart,
-  B = B_PERM,
-  max_gap = MAX_GAP,
-  min_cluster_size = MIN_CLUSTER_SIZE,
-  seed = 20260825
-)
-
-
-## =============================================================================
-## 12. FINAL HESN vs HIV COMPARISON
-## =============================================================================
-
-comparison <- dplyr::bind_rows(
-
-  res_HESN_cluster$observed %>%
-    dplyr::mutate(
-      Group = "HESN-UP"
-    ),
-
-  res_HIV_cluster$observed %>%
-    dplyr::mutate(
-      Group = "HIV-UP"
-    )
-
-) %>%
-  dplyr::select(
-    Group,
-    dplyr::everything()
-  )
-
-cat("\n============================================================\n")
-cat("FINAL COMPARISON: HESN-UP vs HIV-UP\n")
-cat("============================================================\n")
-
-print(comparison)
-view(comparison)
-
-
-## =============================================================================
-## 13. DISPLAY CLUSTERS IN R
-## =============================================================================
-
-cat("\n============================================================\n")
-cat("HESN-UP CLUSTERS\n")
-cat("============================================================\n")
-
-print(
-  res_HESN_cluster$clusters,
-  n = Inf
-)
-
-cat("\n============================================================\n")
-cat("HIV-UP CLUSTERS\n")
-cat("============================================================\n")
-
-print(
-  res_HIV_cluster$clusters,
-  n = Inf
-)
-```
-
-
-
-```{r}
-
-################################################################################
-## FINAL GENOMIC CLUSTER SUMMARY: HESN-UP + HIV-UP
-################################################################################
-
-library(dplyr)
-
-## 1. Extract genomic clusters
-clusters_HESN <- res_HESN_cluster$clusters %>%
-  dplyr::mutate(Group = "HESN-UP")
-
-clusters_HIV <- res_HIV_cluster$clusters %>%
-  dplyr::mutate(Group = "HIV-UP")
-
-## 2. Combine HESN-UP and HIV-UP clusters
-clusters_final <- dplyr::bind_rows(
-  clusters_HESN,
-  clusters_HIV
-) %>%
-  dplyr::select(
-    Group,
-    chromosome_name,
-    cluster_id,
-    n_genes,
-    cluster_start,
-    cluster_end,
-    span_Mb,
-    max_gap_kb,
-    median_gap_kb,
-    cytobands,
-    genes
-  ) %>%
-  dplyr::arrange(
-    factor(Group, levels = c("HESN-UP", "HIV-UP")),
-    dplyr::desc(n_genes),
-    chromosome_name,
-    cluster_start
-  )
-
-## 3. Display the complete genomic cluster table
-print(
-  clusters_final,
-  n = Inf,
-  width = Inf
-)
-
-## 4. Export results as TSV
-write.table(
-  clusters_final,
-  file = "Genomic_clusters_HESN_vs_HIV_min3_gap1Mb.tsv",
-  sep = "\t",
-  quote = FALSE,
-  row.names = FALSE
-)
-
-## 5. Export results as CSV
-write.csv(
-  clusters_final,
-  file = "Genomic_clusters_HESN_vs_HIV_min3_gap1Mb.csv",
-  row.names = FALSE
-)
-
-## 6. Summarize genomic cluster characteristics by group
-cluster_counts <- clusters_final %>%
-  dplyr::group_by(Group) %>%
-  dplyr::summarise(
-    Number_of_clusters = dplyr::n(),
-    Genes_in_clusters = sum(n_genes),
-    Largest_cluster = max(n_genes),
-    .groups = "drop"
-  )
-
-print(cluster_counts)
-
-```
-
-
-## Sensitivity analysis
-
-```{r}
-
-################################################################################
-## SENSITIVITY ANALYSIS
-## Exclude the largest HESN-UP genomic cluster and repeat permutation testing
-################################################################################
-
-library(dplyr)
-
-## -------------------------------------------------------------------------
-## 1. Identify the largest HESN-UP genomic cluster
-## -------------------------------------------------------------------------
-
-clusters_HESN <- res_HESN_cluster$clusters
-
-cluster_max <- clusters_HESN %>%
-  dplyr::arrange(
-    dplyr::desc(n_genes),
-    chromosome_name,
-    cluster_start
-  ) %>%
-  dplyr::slice(1)
-
-cat("\n============================================================\n")
-cat("LARGEST HESN-UP GENOMIC CLUSTER\n")
-cat("============================================================\n")
-
-print(cluster_max, width = Inf)
-
-
-################################################################################
-## SENSITIVITY ANALYSIS:
-## Exclude the largest HESN-UP cluster and repeat the complete permutation test
-################################################################################
-
-library(dplyr)
-
-## ============================================================================
-## 1. Identify the largest HESN-UP cluster
-## ============================================================================
-
-largest_cluster <- res_HESN_cluster$clusters %>%
-  dplyr::arrange(
-    dplyr::desc(n_genes),
-    chromosome_name,
-    cluster_start
-  ) %>%
-  dplyr::slice(1)
-
-cat("\n============================================================\n")
-cat("LARGEST HESN-UP GENOMIC CLUSTER\n")
-cat("============================================================\n")
-
-print(largest_cluster, width = Inf)
-
-
-## ============================================================================
-## 2. Extract genes belonging to the largest cluster
-## ============================================================================
-
-genes_largest_cluster <- unlist(
-  strsplit(
-    largest_cluster$genes,
-    split = ",\\s*"
-  )
-)
-
-genes_largest_cluster <- trimws(
-  genes_largest_cluster
-)
-
-cat(
-  "\nNumber of genes excluded:",
-  length(genes_largest_cluster),
-  "\n"
-)
-
-print(genes_largest_cluster)
-
-
-## ============================================================================
-## 3. Generate a revised HESN-UP gene set excluding these genes
-## ============================================================================
-
-genes_HESN_up_sensitivity <- setdiff(
-  genes_HESN_up,
-  genes_largest_cluster
-)
-
-cat("\n============================================================\n")
-cat("GENE SET FOR SENSITIVITY ANALYSIS\n")
-cat("============================================================\n")
-
-cat(
-  "Original HESN-UP genes:",
-  length(genes_HESN_up),
-  "\n"
-)
-
-cat(
-  "Excluded genes:",
-  length(genes_largest_cluster),
-  "\n"
-)
-
-cat(
-  "Remaining HESN-UP genes:",
-  length(genes_HESN_up_sensitivity),
-  "\n"
-)
-
-# Verify that no genes from the excluded cluster remain
-stopifnot(
-  length(
-    intersect(
-      genes_largest_cluster,
-      genes_HESN_up_sensitivity
-    )
-  ) == 0
-)
-
-
-## ============================================================================
-## 4. Repeat the original genomic clustering and permutation analysis
-## ============================================================================
-
-res_HESN_without_largest <- run_clustering_test(
-  target_genes = genes_HESN_up_sensitivity,
-  label = "HESN_UP_without_largest_cluster",
-  coords_background = coords_background,
-  mart = mart,
-  B = B_PERM,
-  max_gap = MAX_GAP,
-  min_cluster_size = MIN_CLUSTER_SIZE,
-  seed = 20260826
-)
-
-
-## ============================================================================
-## 5. Compare observed clustering metrics: original vs. sensitivity analysis
-## ============================================================================
-
-comparison_sensitivity <- dplyr::bind_rows(
-
-  res_HESN_cluster$observed %>%
-    dplyr::mutate(
-      Analysis = "Original HESN-UP"
-    ),
-
-  res_HESN_without_largest$observed %>%
-    dplyr::mutate(
-      Analysis = "HESN-UP without largest cluster"
-    )
-
-) %>%
-  dplyr::select(
-    Analysis,
-    dplyr::everything()
-  )
-
-cat("\n============================================================\n")
-cat("COMPARISON: ORIGINAL vs. EXCLUSION OF THE LARGEST CLUSTER\n")
-cat("============================================================\n")
-
-print(
-  comparison_sensitivity,
-  width = Inf
-)
-
-
-## ============================================================================
-## 6. Compare permutation test results
-## ============================================================================
-
-permutation_comparison <- dplyr::bind_rows(
-
-  res_HESN_cluster$summary %>%
-    dplyr::mutate(
-      Analysis = "Original HESN-UP"
-    ),
-
-  res_HESN_without_largest$summary %>%
-    dplyr::mutate(
-      Analysis = "HESN-UP without largest cluster"
-    )
-
-) %>%
-  dplyr::select(
-    Analysis,
-    dplyr::everything()
-  )
-
-print(
-  permutation_comparison,
-  n = Inf,
-  width = Inf
-)
-
-
-## ============================================================================
-## 7. Export sensitivity analysis comparisons
-## ============================================================================
-
-write.table(
-  comparison_sensitivity,
-  file = "HESN_sensitivity_without_largest_cluster_observed.tsv",
-  sep = "\t",
-  quote = FALSE,
-  row.names = FALSE
-)
-
-write.table(
-  permutation_comparison,
-  file = "HESN_sensitivity_without_largest_cluster_permutation.tsv",
-  sep = "\t",
-  quote = FALSE,
-  row.names = FALSE
-)
-
-```
 
 
 ## Analysis data Kristina Broliden (Rohl M, et al. HIV-Exposed seronegative sex workers express low T-cell activation and an intact ectocervical tissue microenvironment. Vaccines 2021, 9, 217).
@@ -7899,6 +6613,7 @@ cat(
 
 cat("############################################################\n")
 ```
+
 
 ```{r}
 ################################################################################
@@ -9845,6 +8560,8 @@ print(resultado_youden)
 
 
 
+
+
 ## TTS MODEL 14 GENES
 
 ```{r}
@@ -9865,6 +8582,24 @@ stopifnot(
   !anyNA(all_preds_transport),
   length(all_preds_transport) == ncol(counts(dds))
 )
+
+
+## Verify OOF prediction integrity before survival analysis
+if (!exists("all_preds_transport")) stop("ERROR: Transportable OOF predictions are unavailable.")
+if (!exists("dds")) stop("ERROR: DESeq2 object is unavailable.")
+if (!exists("df_surv")) stop("ERROR: Survival metadata are unavailable.")
+
+sample_ids <- colnames(DESeq2::counts(dds))
+stopifnot(length(all_preds_transport) == length(sample_ids))
+stopifnot(!anyNA(all_preds_transport))
+stopifnot(!anyDuplicated(sample_ids))
+stopifnot(!anyDuplicated(df_surv$sampleID))
+stopifnot(setequal(sample_ids, df_surv$sampleID))
+
+## Positional correspondence must be guaranteed by the prediction pipeline
+cat("OOF predictions:", length(all_preds_transport), "\n")
+cat("Survival participants:", nrow(df_surv), "\n")
+
 
 ## Match each OOF prediction to its corresponding PBMC sample
 df_scores_transport_oof <- data.frame(
@@ -10711,6 +9446,1271 @@ cat(
 
 
 
+
+
+## Analysis clustering genes HESN-UP
+
+```{r}
+
+
+library(biomaRt)
+library(dplyr)
+library(purrr)
+library(ggplot2)
+
+## =============================================================================
+## GENOMIC CLUSTERING ANALYSIS OF HESN-UPREGULATED GENES
+## =============================================================================
+
+## 1. LOAD DIFFERENTIALLY EXPRESSED GENE LISTS
+
+hesn_file <- file.path(getwd(), "DESeq2_HESN_up_noCell.tsv")
+hiv_file <- file.path(getwd(), "DESeq2_HIV_up_noCell.tsv")
+
+stopifnot(file.exists(hesn_file), file.exists(hiv_file))
+
+hesn_deg <- read.delim(hesn_file, check.names = FALSE, stringsAsFactors = FALSE)
+hiv_deg <- read.delim(hiv_file, check.names = FALSE, stringsAsFactors = FALSE)
+
+gene_col <- intersect(c("Gene", "gene", "gene_symbol", "hgnc_symbol", "SYMBOL", "Symbol"), intersect(names(hesn_deg), names(hiv_deg)))
+if (!length(gene_col)) stop("Gene symbol column not identified.")
+gene_col <- gene_col[1]
+
+clean_genes <- function(x) {
+  x <- unique(trimws(as.character(x)))
+  x[!is.na(x) & nzchar(x)]
+}
+
+genes_HESN_up <- clean_genes(hesn_deg[[gene_col]])
+genes_HIV_up <- clean_genes(hiv_deg[[gene_col]])
+
+## Preserve aliases used by downstream analyses
+genes_HESN <- genes_HESN_up
+genes_HIV <- genes_HIV_up
+
+stopifnot(identical(genes_HESN, genes_HESN_up))
+stopifnot(identical(genes_HIV, genes_HIV_up))
+
+cat("HESN-UP:", length(genes_HESN), "\n")
+cat("HIV-UP:", length(genes_HIV), "\n")
+
+
+
+
+## =============================================================================
+## 2. RETRIEVE GENOMIC COORDINATES FROM LOCAL ENSEMBL ANNOTATION
+## =============================================================================
+
+library(ensembldb)
+library(EnsDb.Hsapiens.v86)
+library(dplyr)
+
+## Ensembl release 86, GRCh38
+edb <- EnsDb.Hsapiens.v86::EnsDb.Hsapiens.v86
+
+## Retrieve gene coordinates from the local database
+coords_all <- ensembldb::genes(
+  edb,
+  columns = c("gene_id", "gene_name", "seq_name", "gene_seq_start", "gene_seq_end", "seq_strand", "gene_biotype"),
+  return.type = "DataFrame"
+) %>%
+  as.data.frame()
+
+## Format genomic coordinates for the original clustering pipeline
+coords_HESN <- coords_all %>%
+  dplyr::transmute(
+    hgnc_symbol = as.character(gene_name),
+    ensembl_gene_id = as.character(gene_id),
+    chromosome_name = as.character(seq_name),
+    start_position = as.numeric(gene_seq_start),
+    end_position = as.numeric(gene_seq_end),
+    strand = as.character(seq_strand),
+    gene_biotype = as.character(gene_biotype)
+  ) %>%
+  dplyr::filter(
+    hgnc_symbol %in% genes_HESN &
+    chromosome_name %in% c(as.character(1:22), "X", "Y")
+  ) %>%
+  dplyr::distinct(hgnc_symbol, .keep_all = TRUE) %>%
+  dplyr::arrange(
+    factor(chromosome_name, levels = c(as.character(1:22), "X", "Y")),
+    start_position
+  )
+
+genes_missing <- setdiff(genes_HESN, coords_HESN$hgnc_symbol)
+
+cat("HESN-UP genes:", length(genes_HESN), "\n")
+cat("Mapped genes:", nrow(coords_HESN), "\n")
+cat("Unmapped genes:", length(genes_missing), "\n")
+print(genes_missing)
+
+
+## =============================================================================
+## 3. IDENTIFY GENOMIC CLUSTERS BASED ON INTERGENIC DISTANCE
+## =============================================================================
+
+# Define genomic clusters using a maximum intergenic distance threshold
+assign_clusters <- function(coords, max_gap = 1e6) {
+
+  coords %>%
+    arrange(
+      factor(
+        chromosome_name,
+        levels = c(as.character(1:22), "X", "Y")
+      ),
+      start_position
+    ) %>%
+    group_by(chromosome_name) %>%
+    mutate(
+      previous_end = dplyr::lag(cummax(end_position)),
+
+      gap_bp = start_position - previous_end,
+
+      new_cluster =
+        is.na(previous_end) |
+        gap_bp > max_gap,
+
+      cluster_num = cumsum(new_cluster)
+    ) %>%
+    ungroup() %>%
+    mutate(
+      cluster_id =
+        paste0("chr", chromosome_name, "_C", cluster_num)
+    )
+}
+
+# Assign genomic clusters using a maximum gap of 1 Mb
+coords_1Mb <- assign_clusters(
+  coords_HESN,
+  max_gap = 1e6
+)
+
+## =============================================================================
+## 4. ANNOTATE GENE FAMILIES
+## =============================================================================
+
+# Classify genes into major gene families based on HGNC symbol patterns
+coords_1Mb <- coords_1Mb %>%
+  mutate(
+    GeneFamily = case_when(
+
+      grepl("^OR[0-9]", hgnc_symbol) ~ "Olfactory receptor",
+
+      grepl("^TRAV|^TRBV|^TRGV|^TRDV",
+            hgnc_symbol) ~ "TCR",
+
+      grepl("^IGH|^IGK|^IGL",
+            hgnc_symbol) ~ "Immunoglobulin",
+
+      grepl("^HBA|^HBB|^HBD$|^HBM$",
+            hgnc_symbol) ~ "Globin",
+
+      grepl("^KRTAP",
+            hgnc_symbol) ~ "Keratin-associated protein",
+
+      grepl("^KRT[0-9]",
+            hgnc_symbol) ~ "Keratin",
+
+      grepl("^SPRR",
+            hgnc_symbol) ~ "SPRR",
+
+      grepl("^LCE",
+            hgnc_symbol) ~ "LCE",
+
+      grepl("^ZNF",
+            hgnc_symbol) ~ "Zinc-finger",
+
+      grepl("^PCDH",
+            hgnc_symbol) ~ "Protocadherin",
+
+      grepl("^HIST",
+            hgnc_symbol) ~ "Histone",
+
+      TRUE ~ "Other"
+    )
+  )
+
+
+## =============================================================================
+## 5. SUMMARIZE GENOMIC CLUSTERS
+## =============================================================================
+
+cluster_summary <- coords_1Mb %>%
+  dplyr::group_by(chromosome_name, cluster_id) %>%
+  dplyr::summarise(
+    n_genes = dplyr::n(),
+    cluster_start = min(start_position),
+    cluster_end = max(end_position),
+    span_Mb = (cluster_end - cluster_start) / 1e6,
+    genes = paste(hgnc_symbol, collapse = ", "),
+    .groups = "drop"
+  ) %>%
+  dplyr::filter(n_genes >= 2) %>%
+  dplyr::arrange(dplyr::desc(n_genes), chromosome_name, cluster_start)
+
+print(cluster_summary, n = Inf)
+View(cluster_summary)
+
+
+```
+
+
+## Statistical permutation test for genomic clustering enrichment
+
+
+```{r}
+################################################################################
+## GENOMIC CLUSTERING + PERMUTATION TEST
+## HESN-UP vs HIV-UP
+##
+## Primary cluster definition:
+## - same chromosome
+## - at least 3 genes
+## - distance between consecutive genes <= 1 Mb
+##
+## Null model:
+## - same number of genes per chromosome as the observed gene set
+## - sampling from the actual background of genes tested by DESeq2
+################################################################################
+
+library(biomaRt)
+library(dplyr)
+library(ggplot2)
+library(tibble)
+
+## =============================================================================
+## 1. GLOBAL PARAMETERS
+## =============================================================================
+
+MAX_GAP <- 1e6
+MIN_CLUSTER_SIZE <- 3
+B_PERM <- 10000
+
+
+
+## =============================================================================
+## 2. DESEQ2 INPUTS
+## =============================================================================
+
+library(dplyr)
+library(ensembldb)
+library(EnsDb.Hsapiens.v86)
+
+background_genes <- unique(rownames(dds))
+
+hesn_deg <- read.delim("DESeq2_HESN_up_noCell.tsv", check.names = FALSE, stringsAsFactors = FALSE)
+hiv_deg <- read.delim("DESeq2_HIV_up_noCell.tsv", check.names = FALSE, stringsAsFactors = FALSE)
+
+gene_col <- intersect(c("Gene", "gene", "gene_symbol", "hgnc_symbol", "SYMBOL", "Symbol"), intersect(names(hesn_deg), names(hiv_deg)))
+if (!length(gene_col)) stop("Gene symbol column not identified.")
+gene_col <- gene_col[1]
+
+clean_genes <- function(x) {
+  x <- unique(trimws(as.character(x)))
+  x[!is.na(x) & nzchar(x)]
+}
+
+genes_HESN_up <- clean_genes(hesn_deg[[gene_col]])
+genes_HIV_up <- clean_genes(hiv_deg[[gene_col]])
+genes_HESN <- genes_HESN_up
+genes_HIV <- genes_HIV_up
+
+cat("Background:", length(background_genes), "\n")
+cat("HESN-UP:", length(genes_HESN_up), "\n")
+cat("HIV-UP:", length(genes_HIV_up), "\n")
+
+## =============================================================================
+## 3. LOCAL ENSEMBL GRCh38 ANNOTATION
+## =============================================================================
+
+edb <- EnsDb.Hsapiens.v86::EnsDb.Hsapiens.v86
+
+coords_all <- as.data.frame(ensembldb::genes(
+  edb,
+  columns = c("gene_id", "gene_name", "seq_name", "gene_seq_start", "gene_seq_end", "seq_strand", "gene_biotype"),
+  return.type = "DataFrame"
+)) %>%
+  dplyr::transmute(
+    hgnc_symbol = as.character(gene_name),
+    chromosome_name = as.character(seq_name),
+    start_position = as.numeric(gene_seq_start),
+    end_position = as.numeric(gene_seq_end),
+    band = NA_character_,
+    gene_biotype = as.character(gene_biotype),
+    ensembl_gene_id = as.character(gene_id)
+  ) %>%
+  dplyr::filter(!is.na(hgnc_symbol), nzchar(hgnc_symbol), chromosome_name %in% c(as.character(1:22), "X", "Y")) %>%
+  dplyr::arrange(hgnc_symbol, chromosome_name, start_position, ensembl_gene_id) %>%
+  dplyr::distinct(hgnc_symbol, .keep_all = TRUE)
+
+## =============================================================================
+## 4. RETRIEVE COORDINATES WITHOUT BIOMART
+## =============================================================================
+
+get_coords <- function(genes, coords_reference = coords_all) {
+  coords_reference %>%
+    dplyr::filter(hgnc_symbol %in% unique(genes))
+}
+
+coords_background <- get_coords(background_genes)
+
+cat("Background genes with genomic coordinates:", nrow(coords_background), "\n")
+cat("Unmapped background genes:", length(setdiff(background_genes, coords_background$hgnc_symbol)), "\n")
+
+## Ensure observed genes belong to the mapped testing universe
+missing_HESN_background <- setdiff(genes_HESN_up, coords_background$hgnc_symbol)
+missing_HIV_background <- setdiff(genes_HIV_up, coords_background$hgnc_symbol)
+
+cat("HESN-UP outside mapped background:", length(missing_HESN_background), "\n")
+cat("HIV-UP outside mapped background:", length(missing_HIV_background), "\n")
+
+
+
+## =============================================================================
+## 5. FUNCTION TO ASSIGN PHYSICAL GENOMIC CLUSTERS
+## =============================================================================
+
+assign_clusters <- function(coords, max_gap = 1e6) {
+
+  coords %>%
+    dplyr::arrange(
+      factor(
+        chromosome_name,
+        levels = c(as.character(1:22), "X", "Y")
+      ),
+      start_position,
+      end_position
+    ) %>%
+    dplyr::group_by(
+      chromosome_name
+    ) %>%
+    dplyr::mutate(
+
+      previous_end =
+        dplyr::lag(end_position),
+
+      gap_bp =
+        start_position - previous_end,
+
+      # Start a new cluster if:
+      # 1) this is the first gene on the chromosome
+      # 2) the gap from the previous gene exceeds max_gap
+      new_cluster =
+        is.na(previous_end) |
+        gap_bp > max_gap,
+
+      cluster_number =
+        cumsum(new_cluster)
+
+    ) %>%
+    dplyr::ungroup() %>%
+    dplyr::mutate(
+
+      cluster_id =
+        paste0(
+          "chr",
+          chromosome_name,
+          "_C",
+          cluster_number
+        )
+    )
+}
+
+
+## =============================================================================
+## 6. GENOMIC CLUSTERING METRICS
+## =============================================================================
+
+get_cluster_metrics <- function(
+    coords,
+    max_gap = 1e6,
+    min_cluster_size = 3
+) {
+
+  x <- assign_clusters(
+    coords,
+    max_gap = max_gap
+  )
+
+  cluster_sizes <- x %>%
+    dplyr::count(
+      chromosome_name,
+      cluster_id,
+      name = "n_genes"
+    )
+
+  valid_clusters <- cluster_sizes %>%
+    dplyr::filter(
+      n_genes >= min_cluster_size
+    )
+
+  n_clustered <- sum(
+    valid_clusters$n_genes
+  )
+
+  tibble::tibble(
+
+    n_total_genes =
+      nrow(x),
+
+    n_clusters =
+      nrow(valid_clusters),
+
+    n_clustered_genes =
+      n_clustered,
+
+    proportion_clustered =
+      n_clustered / nrow(x),
+
+    max_cluster_size =
+      ifelse(
+        nrow(valid_clusters) == 0,
+        0,
+        max(valid_clusters$n_genes)
+      )
+  )
+}
+
+
+## =============================================================================
+## 7. EMPIRICAL P-VALUE
+## =============================================================================
+
+empirical_p <- function(
+    null_values,
+    observed
+) {
+
+  (
+    sum(
+      null_values >= observed
+    ) + 1
+  ) /
+    (
+      length(null_values) + 1
+    )
+}
+
+
+## =============================================================================
+## 8. CHROMOSOME-MATCHED RANDOM SAMPLING
+## =============================================================================
+
+sample_chr_matched <- function(
+    coords_background,
+    chr_counts
+) {
+
+  sampled_list <- lapply(
+    seq_len(nrow(chr_counts)),
+
+    function(i) {
+
+      chr_i <-
+        chr_counts$chromosome_name[i]
+
+      n_i <-
+        chr_counts$n_target[i]
+
+      pool <- coords_background %>%
+        dplyr::filter(
+          chromosome_name == chr_i
+        )
+
+      if (nrow(pool) < n_i) {
+
+        stop(
+          paste0(
+            "Insufficient background genes on chr ",
+            chr_i,
+            ". Required: ",
+            n_i,
+            " genes; available: ",
+            nrow(pool),
+            "."
+          )
+        )
+      }
+
+      pool %>%
+        dplyr::slice_sample(
+          n = n_i,
+          replace = FALSE
+        )
+    }
+  )
+
+  dplyr::bind_rows(
+    sampled_list
+  )
+}
+
+
+## =============================================================================
+## 9. MAIN ANALYSIS FUNCTION
+## =============================================================================
+
+run_clustering_test <- function(
+    target_genes,
+    label,
+    coords_background,
+    B = 10000,
+    max_gap = 1e6,
+    min_cluster_size = 3,
+    seed = 12345
+) {
+
+  cat("\n============================================================\n")
+  cat("ANALYSIS:", label, "\n")
+  cat("============================================================\n")
+
+  ## ---------------------------------------------------------------------------
+  ## 9.1 Genomic coordinates
+  ## ---------------------------------------------------------------------------
+
+  
+## Use the same genomic universe for observed and permuted genes
+coords_target <- get_coords(target_genes, coords_background)
+
+missing_genes <- setdiff(target_genes, coords_target$hgnc_symbol)
+
+cat("Original genes:", length(target_genes), "\n")
+cat("Mapped genes:", nrow(coords_target), "\n")
+cat("Unmapped genes:", length(missing_genes), "\n")
+
+
+  cat("Original genes:",
+      length(target_genes), "\n")
+
+  cat("Genes with genomic coordinates:",
+      nrow(coords_target), "\n")
+
+  cat("Genes without genomic coordinates:",
+      length(missing_genes), "\n")
+
+  if (length(missing_genes) > 0) {
+
+    write.table(
+      data.frame(
+        gene = missing_genes
+      ),
+      paste0(
+        label,
+        "_genes_without_coordinates.tsv"
+      ),
+      sep = "\t",
+      quote = FALSE,
+      row.names = FALSE
+    )
+  }
+
+
+  ## ---------------------------------------------------------------------------
+  ## 9.2 Observed genomic clustering
+  ## ---------------------------------------------------------------------------
+
+  obs <- get_cluster_metrics(
+    coords_target,
+    max_gap = max_gap,
+    min_cluster_size = min_cluster_size
+  )
+
+  cat("\nObserved genomic clustering:\n")
+  print(obs)
+
+
+  ## ---------------------------------------------------------------------------
+  ## 9.3 Detailed table of observed clusters
+  ## ---------------------------------------------------------------------------
+
+  coords_clustered <- assign_clusters(
+    coords_target,
+    max_gap = max_gap
+  )
+
+  cluster_summary <- coords_clustered %>%
+    dplyr::group_by(
+      chromosome_name,
+      cluster_id
+    ) %>%
+    dplyr::summarise(
+
+      n_genes =
+        dplyr::n(),
+
+      cluster_start =
+        min(start_position),
+
+      cluster_end =
+        max(end_position),
+
+      span_bp =
+        cluster_end - cluster_start,
+
+      span_Mb =
+        span_bp / 1e6,
+
+      max_gap_kb =
+        ifelse(
+          dplyr::n() > 1,
+          max(
+            gap_bp[-1],
+            na.rm = TRUE
+          ) / 1000,
+          NA_real_
+        ),
+
+      median_gap_kb =
+        ifelse(
+          dplyr::n() > 1,
+          median(
+            gap_bp[-1],
+            na.rm = TRUE
+          ) / 1000,
+          NA_real_
+        ),
+
+      cytobands =
+        paste(
+          unique(band),
+          collapse = "; "
+        ),
+
+      genes =
+        paste(
+          hgnc_symbol,
+          collapse = ", "
+        ),
+
+      .groups = "drop"
+    ) %>%
+    dplyr::filter(
+      n_genes >= min_cluster_size
+    ) %>%
+    dplyr::arrange(
+      dplyr::desc(n_genes),
+      chromosome_name,
+      cluster_start
+    )
+
+
+  ## ---------------------------------------------------------------------------
+  ## 9.4 Gene-level table of genes belonging to qualifying clusters
+  ## ---------------------------------------------------------------------------
+
+  clustered_genes <- coords_clustered %>%
+    dplyr::semi_join(
+      cluster_summary %>%
+        dplyr::select(
+          cluster_id
+        ),
+      by = "cluster_id"
+    ) %>%
+    dplyr::select(
+      chromosome_name,
+      cluster_id,
+      hgnc_symbol,
+      band,
+      start_position,
+      end_position,
+      gap_bp,
+      gene_biotype
+    ) %>%
+    dplyr::arrange(
+      chromosome_name,
+      cluster_id,
+      start_position
+    )
+
+
+  ## ---------------------------------------------------------------------------
+  ## 9.5 Chromosomal distribution
+  ## ---------------------------------------------------------------------------
+
+  chr_counts <- coords_target %>%
+    dplyr::count(
+      chromosome_name,
+      name = "n_target"
+    )
+
+
+  ## ---------------------------------------------------------------------------
+  ## 9.6 Permutations
+  ## ---------------------------------------------------------------------------
+
+  set.seed(seed)
+
+  perm_results <- vector(
+    mode = "list",
+    length = B
+  )
+
+  cat(
+    "\nStarting",
+    B,
+    "chromosome-matched permutations...\n"
+  )
+
+  for (b in seq_len(B)) {
+
+    random_coords <-
+      sample_chr_matched(
+        coords_background,
+        chr_counts
+      )
+
+    perm_results[[b]] <-
+      get_cluster_metrics(
+        random_coords,
+        max_gap = max_gap,
+        min_cluster_size = min_cluster_size
+      )
+
+    if (b %% 1000 == 0) {
+
+      cat(
+        label,
+        ":",
+        b,
+        "/",
+        B,
+        "\n"
+      )
+    }
+  }
+
+  perm_results <-
+    dplyr::bind_rows(
+      perm_results
+    )
+
+
+  ## ---------------------------------------------------------------------------
+  ## 9.7 Empirical p-values
+  ## ---------------------------------------------------------------------------
+
+  p_clusters <-
+    empirical_p(
+      perm_results$n_clusters,
+      obs$n_clusters
+    )
+
+  p_clustered_genes <-
+    empirical_p(
+      perm_results$n_clustered_genes,
+      obs$n_clustered_genes
+    )
+
+  p_prop_clustered <-
+    empirical_p(
+      perm_results$proportion_clustered,
+      obs$proportion_clustered
+    )
+
+  p_max_cluster <-
+    empirical_p(
+      perm_results$max_cluster_size,
+      obs$max_cluster_size
+    )
+
+
+  ## ---------------------------------------------------------------------------
+  ## 9.8 Statistical summary
+  ## ---------------------------------------------------------------------------
+
+  permutation_summary <- tibble::tibble(
+
+    Metric = c(
+      paste0(
+        "Number of clusters (≥",
+        min_cluster_size,
+        " genes)"
+      ),
+
+      paste0(
+        "Number of genes contained in clusters (≥",
+        min_cluster_size,
+        " genes)"
+      ),
+
+      paste0(
+        "Proportion of genes contained in clusters (≥",
+        min_cluster_size,
+        " genes)"
+      ),
+
+      "Maximum cluster size"
+    ),
+
+    Observed = c(
+      obs$n_clusters,
+      obs$n_clustered_genes,
+      obs$proportion_clustered,
+      obs$max_cluster_size
+    ),
+
+    Null_Mean = c(
+      mean(
+        perm_results$n_clusters
+      ),
+      mean(
+        perm_results$n_clustered_genes
+      ),
+      mean(
+        perm_results$proportion_clustered
+      ),
+      mean(
+        perm_results$max_cluster_size
+      )
+    ),
+
+    Null_SD = c(
+      sd(
+        perm_results$n_clusters
+      ),
+      sd(
+        perm_results$n_clustered_genes
+      ),
+      sd(
+        perm_results$proportion_clustered
+      ),
+      sd(
+        perm_results$max_cluster_size
+      )
+    ),
+
+    Empirical_P = c(
+      p_clusters,
+      p_clustered_genes,
+      p_prop_clustered,
+      p_max_cluster
+    )
+  )
+
+  cat("\nPermutation test results:\n")
+  print(
+    permutation_summary
+  )
+
+
+  ## ---------------------------------------------------------------------------
+  ## 9.9 Main figure
+  ## ---------------------------------------------------------------------------
+
+  p <- ggplot(
+    perm_results,
+    aes(
+      x = n_clustered_genes
+    )
+  ) +
+    geom_histogram(
+      bins = 40,
+      boundary = 0
+    ) +
+    geom_vline(
+      xintercept =
+        obs$n_clustered_genes,
+      linetype = "dashed",
+      linewidth = 1
+    ) +
+    annotate(
+      "text",
+      x =
+        obs$n_clustered_genes,
+      y = Inf,
+
+      label =
+        paste0(
+          "Observed = ",
+          obs$n_clustered_genes,
+          "\nEmpirical p = ",
+          signif(
+            p_clustered_genes,
+            3
+          )
+        ),
+
+      vjust = 1.5,
+      hjust = 1.05
+    ) +
+    labs(
+      title =
+        paste0(
+          "Genomic clustering — ",
+          label
+        ),
+
+      subtitle =
+        paste0(
+          B,
+          " chromosome-matched permutations; ",
+          "cluster ≥ ",
+          min_cluster_size,
+          " genes; gap ≤ ",
+          max_gap / 1e6,
+          " Mb"
+        ),
+
+      x =
+        paste0(
+          "Genes located in clusters of ≥",
+          min_cluster_size,
+          " genes"
+        ),
+
+      y =
+        "Permutation count"
+    ) +
+    theme_classic(
+      base_size = 12
+    )
+
+
+  print(p)
+
+
+  ## ---------------------------------------------------------------------------
+  ## 9.10 Export results
+  ## ---------------------------------------------------------------------------
+
+  prefix <- gsub(
+    "[^A-Za-z0-9]+",
+    "_",
+    label
+  )
+
+  write.table(
+    cluster_summary,
+    paste0(
+      prefix,
+      "_physical_clusters_min",
+      min_cluster_size,
+      "_gap",
+      max_gap / 1e6,
+      "Mb.tsv"
+    ),
+    sep = "\t",
+    quote = FALSE,
+    row.names = FALSE
+  )
+
+  write.table(
+    clustered_genes,
+    paste0(
+      prefix,
+      "_clustered_genes_min",
+      min_cluster_size,
+      "_gap",
+      max_gap / 1e6,
+      "Mb.tsv"
+    ),
+    sep = "\t",
+    quote = FALSE,
+    row.names = FALSE
+  )
+
+  write.table(
+    permutation_summary,
+    paste0(
+      prefix,
+      "_permutation_summary_min",
+      min_cluster_size,
+      "_gap",
+      max_gap / 1e6,
+      "Mb.tsv"
+    ),
+    sep = "\t",
+    quote = FALSE,
+    row.names = FALSE
+  )
+
+  write.table(
+    perm_results,
+    paste0(
+      prefix,
+      "_permutation_raw_min",
+      min_cluster_size,
+      "_gap",
+      max_gap / 1e6,
+      "Mb.tsv"
+    ),
+    sep = "\t",
+    quote = FALSE,
+    row.names = FALSE
+  )
+
+  ggsave(
+    paste0(
+      prefix,
+      "_clustering_permutation_min",
+      min_cluster_size,
+      "_gap",
+      max_gap / 1e6,
+      "Mb.pdf"
+    ),
+    plot = p,
+    width = 8,
+    height = 5
+  )
+
+
+  ## ---------------------------------------------------------------------------
+  ## 9.11 Return analysis objects
+  ## ---------------------------------------------------------------------------
+
+  return(
+    list(
+      coordinates = coords_target,
+      clustered_coordinates = coords_clustered,
+      clusters = cluster_summary,
+      clustered_genes = clustered_genes,
+      observed = obs,
+      permutations = perm_results,
+      summary = permutation_summary,
+      plot = p
+    )
+  )
+}
+
+
+## =============================================================================
+## 10. RUN HESN-UP ANALYSIS
+## =============================================================================
+
+res_HESN_cluster <- run_clustering_test(
+  target_genes = genes_HESN_up,
+  label = "HESN_UP",
+  coords_background = coords_background,
+  B = B_PERM,
+  max_gap = MAX_GAP,
+  min_cluster_size = MIN_CLUSTER_SIZE,
+  seed = 20260824
+)
+
+
+## =============================================================================
+## 11. RUN HIV-UP ANALYSIS
+## =============================================================================
+
+res_HIV_cluster <- run_clustering_test(
+  target_genes = genes_HIV_up,
+  label = "HIV_UP",
+  coords_background = coords_background,
+  B = B_PERM,
+  max_gap = MAX_GAP,
+  min_cluster_size = MIN_CLUSTER_SIZE,
+  seed = 20260825
+)
+
+
+## =============================================================================
+## 12. FINAL HESN vs HIV COMPARISON
+## =============================================================================
+
+comparison <- dplyr::bind_rows(
+
+  res_HESN_cluster$observed %>%
+    dplyr::mutate(
+      Group = "HESN-UP"
+    ),
+
+  res_HIV_cluster$observed %>%
+    dplyr::mutate(
+      Group = "HIV-UP"
+    )
+
+) %>%
+  dplyr::select(
+    Group,
+    dplyr::everything()
+  )
+
+cat("\n============================================================\n")
+cat("FINAL COMPARISON: HESN-UP vs HIV-UP\n")
+cat("============================================================\n")
+
+print(comparison)
+view(comparison)
+
+
+## =============================================================================
+## 13. DISPLAY CLUSTERS IN R
+## =============================================================================
+
+cat("\n============================================================\n")
+cat("HESN-UP CLUSTERS\n")
+cat("============================================================\n")
+
+print(
+  res_HESN_cluster$clusters,
+  n = Inf
+)
+
+cat("\n============================================================\n")
+cat("HIV-UP CLUSTERS\n")
+cat("============================================================\n")
+
+print(
+  res_HIV_cluster$clusters,
+  n = Inf
+)
+```
+
+
+
+```{r}
+
+################################################################################
+## FINAL GENOMIC CLUSTER SUMMARY: HESN-UP + HIV-UP
+################################################################################
+
+library(dplyr)
+
+## 1. Extract genomic clusters
+clusters_HESN <- res_HESN_cluster$clusters %>%
+  dplyr::mutate(Group = "HESN-UP")
+
+clusters_HIV <- res_HIV_cluster$clusters %>%
+  dplyr::mutate(Group = "HIV-UP")
+
+## 2. Combine HESN-UP and HIV-UP clusters
+clusters_final <- dplyr::bind_rows(
+  clusters_HESN,
+  clusters_HIV
+) %>%
+  dplyr::select(
+    Group,
+    chromosome_name,
+    cluster_id,
+    n_genes,
+    cluster_start,
+    cluster_end,
+    span_Mb,
+    max_gap_kb,
+    median_gap_kb,
+    cytobands,
+    genes
+  ) %>%
+  dplyr::arrange(
+    factor(Group, levels = c("HESN-UP", "HIV-UP")),
+    dplyr::desc(n_genes),
+    chromosome_name,
+    cluster_start
+  )
+
+## 3. Display the complete genomic cluster table
+print(
+  clusters_final,
+  n = Inf,
+  width = Inf
+)
+
+## 4. Export results as TSV
+write.table(
+  clusters_final,
+  file = "Genomic_clusters_HESN_vs_HIV_min3_gap1Mb.tsv",
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+
+## 5. Export results as CSV
+write.csv(
+  clusters_final,
+  file = "Genomic_clusters_HESN_vs_HIV_min3_gap1Mb.csv",
+  row.names = FALSE
+)
+
+## 6. Summarize genomic cluster characteristics by group
+cluster_counts <- clusters_final %>%
+  dplyr::group_by(Group) %>%
+  dplyr::summarise(
+    Number_of_clusters = dplyr::n(),
+    Genes_in_clusters = sum(n_genes),
+    Largest_cluster = max(n_genes),
+    .groups = "drop"
+  )
+
+print(cluster_counts)
+
+```
+
+
+## Sensitivity analysis
+
+```{r}
+
+
+################################################################################
+## SENSITIVITY ANALYSIS
+## Exclude the largest HESN-UP genomic cluster and repeat permutation testing
+################################################################################
+
+## 1. Identify the largest HESN-UP cluster
+largest_cluster <- res_HESN_cluster$clusters %>%
+  dplyr::arrange(dplyr::desc(n_genes), chromosome_name, cluster_start) %>%
+  dplyr::slice(1)
+
+if (nrow(largest_cluster) != 1) stop("No qualifying HESN-UP cluster found.")
+
+cat("\nLARGEST HESN-UP GENOMIC CLUSTER\n")
+print(largest_cluster, width = Inf)
+
+## 2. Extract genes belonging to the largest cluster
+genes_largest_cluster <- trimws(unlist(strsplit(largest_cluster$genes, ",\\s*")))
+
+cat("\nNumber of genes excluded:", length(genes_largest_cluster), "\n")
+print(genes_largest_cluster)
+
+## 3. Generate the sensitivity gene set
+genes_HESN_up_sensitivity <- setdiff(genes_HESN_up, genes_largest_cluster)
+
+cat("\nOriginal HESN-UP genes:", length(genes_HESN_up), "\n")
+cat("Excluded genes:", length(genes_largest_cluster), "\n")
+cat("Remaining HESN-UP genes:", length(genes_HESN_up_sensitivity), "\n")
+
+stopifnot(!any(genes_largest_cluster %in% genes_HESN_up_sensitivity))
+stopifnot(all(genes_largest_cluster %in% genes_HESN_up))
+
+## 4. Repeat the genomic clustering permutation test
+res_HESN_without_largest <- run_clustering_test(
+  target_genes = genes_HESN_up_sensitivity,
+  label = "HESN_UP_without_largest_cluster",
+  coords_background = coords_background,
+  B = B_PERM,
+  max_gap = MAX_GAP,
+  min_cluster_size = MIN_CLUSTER_SIZE,
+  seed = 20260826
+)
+
+## 5. Compare observed clustering metrics
+comparison_sensitivity <- dplyr::bind_rows(
+  res_HESN_cluster$observed %>% dplyr::mutate(Analysis = "Original HESN-UP"),
+  res_HESN_without_largest$observed %>% dplyr::mutate(Analysis = "HESN-UP without largest cluster")
+) %>%
+  dplyr::select(Analysis, dplyr::everything())
+
+cat("\nCOMPARISON: ORIGINAL vs. SENSITIVITY ANALYSIS\n")
+print(comparison_sensitivity, width = Inf)
+
+## 6. Compare permutation test results
+permutation_comparison <- dplyr::bind_rows(
+  res_HESN_cluster$summary %>% dplyr::mutate(Analysis = "Original HESN-UP"),
+  res_HESN_without_largest$summary %>% dplyr::mutate(Analysis = "HESN-UP without largest cluster")
+) %>%
+  dplyr::select(Analysis, dplyr::everything())
+
+print(permutation_comparison, n = Inf, width = Inf)
+
+## 7. Export sensitivity comparisons
+write.table(comparison_sensitivity, "HESN_sensitivity_without_largest_cluster_observed.tsv", sep = "\t", quote = FALSE, row.names = FALSE)
+write.table(permutation_comparison, "HESN_sensitivity_without_largest_cluster_permutation.tsv", sep = "\t", quote = FALSE, row.names = FALSE)
+
+```
+
+
+
+
 ```{r}
 
 library(pROC)
@@ -11494,8 +11494,8 @@ for (i in seq_along(folds_cervix)) {
   # counts >= 10 in >= 5 training samples
 
   keep <- rowSums(
-    counts(dds_tr) >= 200
-  ) >= 10
+    counts(dds_tr) >= 10
+  ) >= 5
 
   dds_tr <- dds_tr[
     keep,
@@ -11525,13 +11525,9 @@ for (i in seq_along(folds_cervix)) {
   )
 
 
-  res_tr_df <- as.data.frame(
-    res_tr
-  ) %>%
-    rownames_to_column("gene") %>%
-    filter(
-      !is.na(padj)
-    )
+  res_tr_df <- as.data.frame(res_tr) %>%
+  tibble::rownames_to_column("gene") %>%
+  dplyr::filter(!is.na(padj))
 
 
   # ==========================================================
@@ -11570,18 +11566,10 @@ cat(
     cervix_used_planB[i] <- TRUE
 
     genes_ml_fold <- res_tr_df %>%
-      filter(
-        !is.na(pvalue)
-      ) %>%
-      arrange(
-        pvalue
-      ) %>%
-      slice_head(
-        n = 100
-      ) %>%
-      pull(
-        gene
-      )
+  dplyr::filter(!is.na(pvalue)) %>%
+  dplyr::arrange(pvalue) %>%
+  dplyr::slice_head(n = 100) %>%
+  dplyr::pull(gene)
 
     message(
       "Fallback activated: top 100 genes ranked by p-value."
@@ -11987,32 +11975,13 @@ cervix_deseq_counts <-
   )
 
 
-cervix_en_counts <-
-  cervix_coefficients_history %>%
-  filter(
-    Lambda == "lambda.1se",
-    Gene != "(Intercept)"
-  ) %>%
-  group_by(Gene) %>%
-  summarise(
-
-    Folds_Selected_EN =
-      sum(Beta != 0),
-
-    Mean_Beta_Conditional =
-      ifelse(
-        any(Beta != 0),
-        mean(Beta[Beta != 0]),
-        NA_real_
-      ),
-
-    Median_Beta_Conditional =
-      ifelse(
-        any(Beta != 0),
-        median(Beta[Beta != 0]),
-        NA_real_
-      ),
-
+cervix_en_counts <- cervix_coefficients_history %>%
+  dplyr::filter(Lambda == "lambda.1se", Gene != "(Intercept)") %>%
+  dplyr::group_by(Gene) %>%
+  dplyr::summarise(
+    Folds_Selected_EN = sum(Beta != 0),
+    Mean_Beta_Conditional = ifelse(any(Beta != 0), mean(Beta[Beta != 0]), NA_real_),
+    Median_Beta_Conditional = ifelse(any(Beta != 0), median(Beta[Beta != 0]), NA_real_),
     .groups = "drop"
   )
 
@@ -12079,40 +12048,34 @@ print(
 
 ```{r}
 
+
 library(dplyr)
 library(ggplot2)
 library(ggpubr)
 
-log_cervix <- read.csv(
-  "GSE165132_CPM_TMM_log2_gene_counts_matrix.csv",
-  check.names = FALSE
-)
+## Load normalized ectocervical expression
+log_cervix <- read.csv("GSE165132_CPM_TMM_log2_gene_counts_matrix.csv", check.names = FALSE)
 
-dim(log_cervix)
-colnames(log_cervix)[1:10]
-
+## Extract CXCL9 expression
 cxcl9 <- log_cervix %>%
   dplyr::filter(symbol == "CXCL9")
 
-cxcl9
+stopifnot(nrow(cxcl9) == 1)
 
-
-# Extract CXCL9 expression from the log2-CPM matrix
-cxcl9 <- log_cervix %>%
-  filter(symbol == "CXCL9")
-
-# Reshape expression data into long format
+## Reshape expression data into long format
 cxcl9_long <- data.frame(
   sampleID = colnames(cxcl9)[-(1:3)],
   expression = as.numeric(cxcl9[1, -(1:3)])
 ) %>%
-  left_join(
-    meta_cervix %>% select(subjectID, group),
+  dplyr::left_join(
+    meta_cervix %>% dplyr::select(subjectID, group),
     by = c("sampleID" = "subjectID")
   )
 
-# Verify group distribution
-table(cxcl9_long$group)
+## Verify sample matching and group distribution
+stopifnot(!anyNA(cxcl9_long$group))
+print(table(cxcl9_long$group))
+
 
 ```
 
@@ -12127,6 +12090,13 @@ library(caret)
 library(pROC)
 library(dplyr)
 
+## Use the raw count matrix from the previous ectocervical analysis
+counts_cervix <- mat_raw_cervix
+
+stopifnot(
+  identical(colnames(counts_cervix), rownames(meta_cervix)),
+  identical(length(y_bin_cervix), ncol(counts_cervix))
+)
 # ==========================================================
 # 1. GLOBAL DESeq2 — DELIBERATE DATA LEAKAGE
 # ==========================================================
@@ -12159,27 +12129,19 @@ res_leaky <- results(
 res_leaky_df <- as.data.frame(res_leaky)
 res_leaky_df$gene <- rownames(res_leaky_df)
 
-# GLOBAL feature selection using all 56 outcome labels
+## Global supervised feature selection — deliberately leaky
 genes_leaky <- res_leaky_df %>%
-  filter(
-    !is.na(pvalue),
-    pvalue < 0.05
-  ) %>%
-  pull(gene)
+  dplyr::filter(!is.na(pvalue), pvalue < 0.05) %>%
+  dplyr::pull(gene)
 
-cat(
-  "Genes selected GLOBALLY at p < 0.05:",
-  length(genes_leaky),
-  "\n"
-)
+cat("Genes selected GLOBALLY at p < 0.05:", length(genes_leaky), "\n")
 
 head(
   res_leaky_df %>%
-    filter(gene %in% genes_leaky) %>%
-    arrange(pvalue),
+    dplyr::filter(gene %in% genes_leaky) %>%
+    dplyr::arrange(pvalue),
   20
 )
-
 # ==========================================================
 # 2. 10-FOLD CV USING GLOBALLY SELECTED FEATURES
 #    !!! DELIBERATE FEATURE-SELECTION LEAKAGE !!!
@@ -12563,45 +12525,66 @@ dev.off()
 
 ```{r}
 
-############################################################
-## SCRIPT: 95% CONFIDENCE INTERVALS AND ROC FIGURE LEGEND (2 × 2)
-############################################################
+
+################################################################################
+## AUC 95% CONFIDENCE INTERVALS AND MANUSCRIPT FIGURE LEGEND
+## ORIG17 vs. CC14 — PBMC and ectocervix
+################################################################################
 
 library(pROC)
 
-# 1. Define a function to calculate and report AUC with 95% confidence intervals
-calc_auc_ci <- function(response, predictor, label) {
-  roc_obj <- pROC::roc(response = response, predictor = predictor, levels = c(0, 1), direction = "<", quiet = TRUE)
+## 1. Use the existing ROC objects
+roc_ORIG17_PBMC <- roc_1se
+roc_ORIG17_CERV <- roc_externo
+roc_CC14_PBMC <- roc_transport_oof
+roc_CC14_CERV <- roc_external_transport
+
+## 2. Calculate AUC and 95% CI directly from each ROC object
+calc_auc_ci <- function(roc_obj, label) {
   auc_val <- as.numeric(pROC::auc(roc_obj))
-  ci_res  <- pROC::ci.auc(roc_obj, method = "delong") # Change to "bootstrap" if preferred
-
-  formatted_str <- sprintf("%.3f (95%% CI, %.3f–%.3f)", auc_val, ci_res[1], ci_res[3])
-  cat(paste0(label, ": ", formatted_str, "\n"))
-
-  return(list(roc = roc_obj, auc = auc_val, ci_lower = ci_res[1], ci_upper = ci_res[3], text = formatted_str))
+  ci_res <- pROC::ci.auc(roc_obj, method = "delong")
+  formatted <- sprintf("%.3f (95%% CI, %.3f–%.3f)", auc_val, ci_res[1], ci_res[3])
+  cat(label, ": ", formatted, "\n", sep = "")
+  return(list(roc = roc_obj, auc = auc_val, ci_lower = as.numeric(ci_res[1]), ci_upper = as.numeric(ci_res[3]), text = formatted))
 }
 
-# 2. Load the updated prediction data frames
-# Replace variable/file names with the corresponding objects or actual file paths:
-# res_panelA <- calc_auc_ci(df_orig_pbmc$y,       df_orig_pbmc$pred,       "Panel A (ORIG17 - PBMC)")
-# res_panelB <- calc_auc_ci(df_orig_ectocervix$y, df_orig_ectocervix$pred, "Panel B (ORIG17 - Ectocervix)")
-# res_panelC <- calc_auc_ci(df_cc14_pbmc$y,       df_cc14_pbmc$pred,       "Panel C (CC14 - PBMC)")
-# res_panelD <- calc_auc_ci(df_cc14_ectocervix$y, df_cc14_ectocervix$pred, "Panel D (CC14 - Ectocervix)")
+## 3. Calculate results for the four panels
+res_panelA <- calc_auc_ci(roc_ORIG17_PBMC, "A — ORIG17 / PBMC")
+res_panelB <- calc_auc_ci(roc_ORIG17_CERV, "B — ORIG17 / Ectocervix")
+res_panelC <- calc_auc_ci(roc_CC14_PBMC, "C — CC14 / PBMC")
+res_panelD <- calc_auc_ci(roc_CC14_CERV, "D — CC14 / Ectocervix")
 
-# 3. Automatically generate the figure legend for the manuscript
-cat("\n============================================================\n")
-cat("SUGGESTED FIGURE LEGEND FOR THE MANUSCRIPT:\n")
-cat("============================================================\n\n")
+## 4. Export summary table
+auc_summary <- data.frame(
+  Panel = c("A", "B", "C", "D"),
+  Classifier = c("ORIG17", "ORIG17", "CC14", "CC14"),
+  Cohort = c("PBMC", "Ectocervix", "PBMC", "Ectocervix"),
+  AUC = c(res_panelA$auc, res_panelB$auc, res_panelC$auc, res_panelD$auc),
+  CI_lower = c(res_panelA$ci_lower, res_panelB$ci_lower, res_panelC$ci_lower, res_panelD$ci_lower),
+  CI_upper = c(res_panelA$ci_upper, res_panelB$ci_upper, res_panelC$ci_upper, res_panelD$ci_upper)
+)
 
-cat(paste0(
+print(auc_summary, row.names = FALSE)
+write.table(auc_summary, "ROC_ORIG17_CC14_AUC_95CI.tsv", sep = "\t", quote = FALSE, row.names = FALSE)
+
+## 5. Generate manuscript figure legend
+figure_legend <- paste0(
   "Figure X. Predictive performance and cross-cohort transportability of the gene classifiers. ",
-  "Receiver operating characteristic (ROC) curves evaluating discrimination performance across discovery and external validation datasets. ",
-  "(A) Internal out-of-fold (OOF) cross-validation of the original 17-gene classifier in the discovery cohort (PBMC; AUC = ", res_panelA$text, "). ",
-  "(B) External validation of the original 17-gene classifier in the independent validation cohort (ectocervix, GSE165132; AUC = ", res_panelB$text, "). ",
-  "(C) Internal OOF discrimination of the transportability-constrained 14-gene classifier developed using genes measurable across both platforms (PBMC; AUC = ", res_panelC$text, "). ",
-  "(D) External validation of the transportability-constrained 14-gene classifier in the independent validation cohort (ectocervix; AUC = ", res_panelD$text, "). ",
-  "DeLong's method was used to estimate 95% confidence intervals."
-))
+  "Receiver operating characteristic (ROC) curves comparing the original 17-gene classifier (ORIG17) ",
+  "and the transportability-constrained 14-gene classifier (CC14) across PBMC and ectocervical datasets. ",
+  "(A) ORIG17 in PBMC: AUC = ", res_panelA$text, ". ",
+  "(B) ORIG17 in ectocervix (GSE165132): AUC = ", res_panelB$text, ". ",
+  "(C) CC14 in PBMC: AUC = ", res_panelC$text, ". ",
+  "(D) CC14 in ectocervix (GSE165132): AUC = ", res_panelD$text, ". ",
+  "AUC 95% confidence intervals were calculated using DeLong's method."
+)
+
+cat("\n============================================================\n")
+cat("MANUSCRIPT FIGURE LEGEND\n")
+cat("============================================================\n\n")
+cat(figure_legend, "\n")
+
+writeLines(figure_legend, "ROC_ORIG17_CC14_figure_legend.txt")
 
 ```
 
@@ -12731,7 +12714,7 @@ km_CC14 <- ggsurvplot(
   ),
 
   # Log-rank
-  pval = "Log-rank p = 7.14 × 10\u207B\u00B9\u00B9",
+  pval = paste0("Log-rank p = ", format(p_CC14, scientific = TRUE, digits = 3)),
   pval.coord = c(60, 0.18),
 
   # Axes
@@ -12900,14 +12883,9 @@ key_times <- c(
 )
 
 ann_CC14 <- hr_CC14 %>%
-  filter(Time %in% key_times) %>%
-  mutate(
-    label = sprintf(
-      "HR %.2f\n(%.2f–%.2f)",
-      HR,
-      lower,
-      upper
-    )
+  dplyr::filter(Time %in% key_times) %>%
+  dplyr::mutate(
+    label = sprintf("HR %.2f\n(%.2f–%.2f)", HR, lower, upper)
   )
 
 
